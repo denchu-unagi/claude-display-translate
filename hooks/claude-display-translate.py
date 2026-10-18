@@ -7,6 +7,8 @@ import sys
 import time
 
 STARTED = time.monotonic()
+# ログ行から会話ログの該当メッセージを引けるよう、処理中のメッセージをログに記録する。
+current_message = ""
 MARK = "[自動翻訳]\n"
 FAIL_MARK = "[翻訳失敗: 原文を表示]\n"
 LONG_MARK = "[長文のため原文を表示]\n"
@@ -17,6 +19,8 @@ HOOK_BUDGET_SECONDS = 55
 KILL_GRACE_SECONDS = 1
 LOG_NAME = "translate.log"
 LOG_MAX_BYTES = 1 << 20
+LOG_VALUE_MAX_CHARS = 200
+LOG_REPLY_HEAD_CHARS = 100
 FAILURE_FLAG_NAME = "last-failure"
 FAILURE_COOLDOWN_SECONDS = 300
 FINAL_WAIT_SECONDS = 10.0
@@ -234,7 +238,7 @@ def run_child(text):
     import tempfile
 
     if in_cooldown():
-        return fail("skipped")
+        return fail("skipped_cooldown")
     known_secrets = [os.environ[name] for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
                      if os.environ.get(name) and len(os.environ[name]) >= 8]
     if SECRET_PATTERN.search(text) or any(secret in text for secret in known_secrets):
@@ -269,7 +273,7 @@ def run_child(text):
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE, env=env, start_new_session=True)
         except Exception as exc:
-            return fail("spawn_error", 0, type(exc).__name__)
+            return fail("spawn_error", exception=type(exc).__name__)
         timed_out = False
         error = None
         try:
@@ -294,9 +298,9 @@ def run_child(text):
         note_failure()
         return fail("timeout", elapsed)
     if error:
-        return fail("cli_error", elapsed, error)
+        return fail("cli_error", elapsed, exception=error)
     if process.returncode != 0:
-        return fail(_failure(stdout + stderr), elapsed, "exit=%s" % process.returncode)
+        return fail(_failure(stdout + stderr), elapsed, exit_code=process.returncode)
     translated = stdout.decode("utf-8", "replace")
     if SECRET_PATTERN.search(translated) or any(secret in translated for secret in known_secrets):
         return fail("credential_in_output", elapsed)
@@ -319,7 +323,8 @@ def translate(full, lead):
     if wrapped and not re.search(r"(?m)^```", wrapped.group(1)):
         text = wrapped.group(1) + "\n"
     if not re.search(KANA_CLASS, text):
-        return fail("no_japanese", elapsed)
+        # 仮名の無い返答は再現しにくいため、原因を後から確かめられるよう先頭だけ記録する。
+        return fail("no_japanese", elapsed, reply_head=text[:LOG_REPLY_HEAD_CHARS])
     # 子CLIが足した文脈を訳した出力は忠実性検査を通ることがあるため、訳文として表示しない。
     # 予約タグは保護時にplaceholderへ移したので、元に戻す前の訳文にあれば足された文脈を含む。
     # 長さは原文の2倍に余裕を足した閾値で検査し、余裕は数文字の原文の正訳を通すために置く。
@@ -328,12 +333,9 @@ def translate(full, lead):
             or len(text) > len(protected) * MAX_LENGTH_RATIO + LENGTH_SLACK_CHARS):
         return fail("echoed_context", elapsed)
     if not faithful(protected, text):
-        counts = [n for pair in zip(structure(protected), structure(text)) for n in pair]
-        detail = "blocks=%d/%d items=%d/%d heads=%d/%d missing=%s" % (
-            *counts,
-            "".join(missing_pieces(protected, text)[:1]),
-        )
-        return fail("unfaithful", elapsed, detail)
+        counts = ["%d/%d" % pair for pair in zip(structure(protected), structure(text))]
+        return fail("unfaithful", elapsed, blocks=counts[0], items=counts[1], heads=counts[2],
+                    missing="".join(missing_pieces(protected, text)[:1]))
     restored = restore_code(text, blocks, base)
     if restored is None:
         return fail("placeholder", elapsed)
@@ -344,7 +346,7 @@ def translate(full, lead):
         restored = restored[matched.end():]
     else:
         restored = restored.lstrip("\n")
-    log_event("ok", elapsed, "chars=%d" % len(text))
+    log_event("translated", elapsed, translated_chars=len(text))
     return restored
 
 
@@ -365,18 +367,25 @@ def state_path(key, suffix):
     return os.path.join(state_dir(), key + "." + suffix)
 
 
-def log_event(reason, elapsed=0.0, detail=""):
+def log_value(value):
+    text = str(value)[:LOG_VALUE_MAX_CHARS]
+    # 空白・引用符・等号を含む値と空の値はJSON文字列で囲み、1行をkey=valueの並びとして読めるようにする。
+    return json.dumps(text, ensure_ascii=False) if not text or re.search(r'[\s"=\\]', text) else text
+
+
+def log_event(result, elapsed=None, **fields):
     try:
         ensure_state_dir()
         path = os.path.join(state_dir(), LOG_NAME)
         if os.path.exists(path) and os.path.getsize(path) > LOG_MAX_BYTES:
             os.replace(path, path + ".1")
-        line = "%s\t%s\t%.1f\t%s\n" % (
-            time.strftime("%Y-%m-%dT%H:%M:%S"),
-            reason,
-            elapsed,
-            " ".join(str(detail).split())[:200],
-        )
+        pairs = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "result": result}
+        if current_message:
+            pairs["message"] = current_message
+        if elapsed is not None:
+            pairs["elapsed_sec"] = "%.1f" % elapsed
+        pairs.update(fields)
+        line = " ".join("%s=%s" % (key, log_value(value)) for key, value in pairs.items()) + "\n"
         with open(path, "ab") as handle:
             handle.write(line.encode("utf-8"))
     except OSError:
@@ -387,8 +396,8 @@ def describe_error(exc):
     return "%s: %s" % (type(exc).__name__, exc)
 
 
-def fail(reason, elapsed=0.0, detail=""):
-    log_event(reason, elapsed, detail)
+def fail(reason, elapsed=None, **fields):
+    log_event(reason, elapsed, **fields)
     return None
 
 
@@ -539,7 +548,7 @@ def emit(content):
 
 def handle_non_final(key, index, delta):
     if os.path.exists(state_path(key, "closed")):
-        log_event("late", 0, "index=%d" % index)
+        log_event("late", index=index)
         return
     lang = read_lang(key)
     if lang is None and index > 0:
@@ -559,7 +568,7 @@ def handle_non_final(key, index, delta):
         return
     with locked(key):
         if os.path.exists(state_path(key, "closed")):
-            log_event("late", 0, "index=%d" % index)
+            log_event("late", index=index)
             return
         write_state(batch_path(key, index, "held"), delta)
     emit(MARK if index == lang[1] else "")
@@ -608,13 +617,13 @@ def final_output(key, index, delta, state):
     source = lead + full
     counts = count_chars(source)
     if classify(counts) == "ja" and counts[0] * KANA_WEIGHT >= counts[2]:
-        log_event("mostly_ja", 0, "ja=%d words=%d" % (counts[1], counts[3]))
+        log_event("skipped_mostly_ja", ja_chars=counts[1], en_words=counts[3])
         return full
     if counts[2] == 0:
         return full
     length = len(protect_code(source)[0])
     if length > MAX_TRANSLATE_CHARS:
-        log_event("long", 0, "chars=%d" % length)
+        log_event("skipped_long", source_chars=length)
         return None if state["prefix"] else LONG_MARK + full
     translated = translate(source, lead)
     if translated is None:
@@ -629,7 +638,7 @@ def handle_final(key, index, delta):
         try:
             output = final_output(key, index, delta, state)
         except Exception as exc:
-            log_event("error", 0, describe_error(exc))
+            log_event("error", error=describe_error(exc))
             if state["full"] is not None:
                 output = FAIL_MARK + state["full"]
             elif state["en"]:
@@ -641,6 +650,7 @@ def handle_final(key, index, delta):
 
 
 def main():
+    global current_message
     raw = sys.stdin.buffer.read()
     if os.environ.get("MSGDISP_TRANSLATE_CHILD"):
         return
@@ -665,12 +675,13 @@ def main():
             delta = ""
         session_id = data.get("session_id") or ""
         key = make_key(session_id, data["message_id"])
+        current_message = key
         if final:
             handle_final(key, index, delta)
         else:
             handle_non_final(key, index, delta)
     except Exception as exc:
-        log_event("error", 0, describe_error(exc))
+        log_event("error", error=describe_error(exc))
 
 
 if __name__ == "__main__":

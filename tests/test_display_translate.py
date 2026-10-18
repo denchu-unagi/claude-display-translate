@@ -118,6 +118,15 @@ class ChildInvocationTest(HookTestCase):
                 self.assertIn("翻訳失敗", self.final_once("echo-%d" % number))
         self.assertEqual(self.log().count("echoed_context"), len(echoes))
 
+    def test_reply_without_kana_is_logged_on_one_line(self):
+        # 仮名の無い返答は原因を確かめられるよう先頭100文字だけ記録し、改行を含んでも1行のkey=valueに保つ。
+        head = "Still English.\n" + "x" * 85
+        self.use_child("print(%r)" % ("<translation>\n" + head + "y" * 20 + "\n</translation>"))
+        self.assertIn("翻訳失敗", self.final_once("no-kana"))
+        [line] = self.log().splitlines()
+        self.assertIn(" result=no_japanese message=standalo-no-kana elapsed_sec=", line)
+        self.assertTrue(line.endswith(" reply_head=" + json.dumps(head)), line)
+
     def test_child_error_is_classified_without_its_text_or_cooldown(self):
         self.use_child("import sys; print('SYNTHETIC_ERROR_DETAIL'); sys.exit(1)")
         self.assertIn("翻訳失敗", self.final_once("error"))
