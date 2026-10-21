@@ -160,6 +160,18 @@ class ChildInvocationTest(HookTestCase):
         with patch.dict(os.environ, self.env, clear=True):
             self.assertEqual(runtime["translate"]("Yes.", ""), "はい、そのとおりです。")
 
+    def test_a_stray_backtick_does_not_pair_with_inline_code(self):
+        # 行中の ``` と後続の `ls` の間は英文なので、訳されて消えても訳文を表示する。`ls` が欠けた訳文は拒否する。
+        source = "Close the ``` fence, then run `ls`."
+        cases = (("``` フェンスを閉じてから `ls` を実行します。", "``` フェンスを閉じてから `ls` を実行します。"),
+                 ("``` フェンスを閉じてから ls を実行します。", None))
+        for translation, expected in cases:
+            with self.subTest(translation=translation):
+                self.use_child("print(%r)" % ("<translation>" + translation + "</translation>"))
+                runtime = self.runtime()
+                with patch.dict(os.environ, self.env, clear=True):
+                    self.assertEqual(runtime["translate"](source, ""), expected)
+
     def test_timeout_starts_cooldown_even_when_the_kill_fails(self):
         for kill_error in (None, PermissionError()):
             with self.subTest(kill_error=type(kill_error).__name__):
