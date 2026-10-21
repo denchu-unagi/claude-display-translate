@@ -36,7 +36,9 @@ MAX_LENGTH_RATIO = 2
 LENGTH_SLACK_CHARS = 100
 LIST_ITEM_PATTERN = r"[ \t]*(?:[-*+]|\d+[.)])[ \t]"
 HEADING_PATTERN = r"#{1,6}[ \t]"
-INLINE_CODE_PATTERN = r"`[^`\n]+`"
+# CommonMarkと同じく、同じ長さのバッククォート列同士だけを組にする。長さの違う列（行中の ``` と
+# 後続の ` など）を組にすると、間の英文をコードとみなし、それを訳した正しい訳文を不忠実と判定する。
+INLINE_CODE_PATTERN = r"(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)"
 URL_PATTERN = r"https?://[^\s<>()\[\]]+"
 MIN_JA_CHARS = 2
 KANA_WEIGHT = 3
@@ -149,7 +151,7 @@ def structure(text):
 
 
 def missing_pieces(source, translated):
-    pieces = re.findall(INLINE_CODE_PATTERN, source)
+    pieces = [match.group(0) for match in re.finditer(INLINE_CODE_PATTERN, source)]
     pieces += [url.rstrip(".,;:") for url in re.findall(URL_PATTERN, source)]
     return [piece for piece in pieces if piece not in translated]
 
