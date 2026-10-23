@@ -151,7 +151,13 @@ def structure(text):
 
 
 def missing_pieces(source, translated):
-    pieces = [match.group(0) for match in re.finditer(INLINE_CODE_PATTERN, source)]
+    pieces = []
+    for match in re.finditer(INLINE_CODE_PATTERN, source):
+        inner = match.group(0).strip("`")
+        # 子CLIは `。` のように中身が日本語の記号だけのinline codeを「。」と括り直すことがある。
+        # 中身にASCII（空白を含む）が無いものに限り、バッククォートを除いた中身が訳文にあれば欠落とみなさない。
+        # そのため句読点だけのinline codeは、言及ごと訳文から消えても検出できない。
+        pieces.append(inner if not any(c.isascii() for c in inner) else match.group(0))
     pieces += [url.rstrip(".,;:") for url in re.findall(URL_PATTERN, source)]
     return [piece for piece in pieces if piece not in translated]
 
