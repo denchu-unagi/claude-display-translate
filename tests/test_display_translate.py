@@ -172,6 +172,20 @@ class ChildInvocationTest(HookTestCase):
                 with patch.dict(os.environ, self.env, clear=True):
                     self.assertEqual(runtime["translate"](source, ""), expected)
 
+    def test_japanese_only_inline_code_may_lose_its_backticks(self):
+        # 子CLIは `。` を「。」と書き直すことがあり、その訳文は表示する。中身ごと消えた訳文と、
+        # ASCIIを含む inline code（空白だけ、日本語との混在）がバッククォートごと消えた訳文は拒否する。
+        cases = (("Use `split()` to cut the text at each `。`.", "`split()` で文を「。」ごとに分けます。", True),
+                 ("Print `完了` when it ends.", "終わったら表示します。", False),
+                 ("Join the words with ` `.", "単語を空白でつなぎます。", False),
+                 ("Open `設定.json` first.", "まず 設定.json を開きます。", False))
+        for source, translation, shown in cases:
+            with self.subTest(source=source):
+                self.use_child("print(%r)" % ("<translation>" + translation + "</translation>"))
+                runtime = self.runtime()
+                with patch.dict(os.environ, self.env, clear=True):
+                    self.assertEqual(runtime["translate"](source, ""), translation if shown else None)
+
     def test_timeout_starts_cooldown_even_when_the_kill_fails(self):
         for kill_error in (None, PermissionError()):
             with self.subTest(kill_error=type(kill_error).__name__):
