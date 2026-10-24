@@ -21,6 +21,14 @@ ENGLISH = [
     "The build failed because `npm ci` could not resolve a peer dependency.\n",
     "Run `bun test` and read https://example.com/docs for details.\n",
 ]
+# 英語の1行目に続く、ほぼ日本語の本文。見出し・リストの日本語の行と、インデントした英語の行を含む。
+# 予約タグを含む日本語の行も、伏せた本文のまま戻ることを確かめる。
+MOSTLY_JAPANESE = (
+    "## 状態\n\n"
+    "1. コミットをプッシュしました。レビューもおわりました。\n"
+    "2. あとはマージをまつだけです。<source> タグはそのままのこします。\n\n"
+    "    - Parse the config and validate it before saving.\n"
+)
 WAIT_SECONDS = 10
 
 
@@ -259,13 +267,50 @@ class TranslationFlowTest(HookTestCase):
         self.assertEqual(outputs, [None, None, None])
         self.assertFalse(marker.exists())
 
-    def test_marks_a_mostly_japanese_message_after_showing_the_translation_mark(self):
-        marker = self.use_translator()
+    # 伏せ字だけの行（前にリストや見出しの記号があってもよい）はそのまま返し、ほかの行へカナを足す偽翻訳。
+    # 受け取った原文を received に書き、日本語の行が翻訳に送られていないことを確かめられるようにする。
+    def use_line_translator(self, received, swap=False):
+        self.use_child("\n".join([
+            "import re, sys",
+            "prompt = open(sys.argv[sys.argv.index('--system-prompt-file') + 1], encoding='utf-8').read()",
+            "source = re.search(r'<source>\\n(.*)\\n</source>', prompt, re.S).group(1)",
+            "open(%r, 'w', encoding='utf-8').write(source)" % str(received),
+            "hidden = r'[ \\t>#*+0-9.)-]*\\[\\[\\[CODE\\d+\\]\\]\\]'",
+            "lines = [line if not line.strip() or re.fullmatch(hidden, line) else line + ' やく' for line in source.split('\\n')]",
+            "if %r:" % swap,
+            "    found = [i for i, line in enumerate(lines) if re.fullmatch(hidden, line)]",
+            "    lines[found[0]], lines[found[1]] = lines[found[1]], lines[found[0]]",
+            "print('<translation>\\n' + '\\n'.join(lines) + '\\n</translation>')",
+            "",
+        ]))
+
+    def test_translates_only_the_english_lines_of_a_mostly_japanese_message(self):
         # 1行目だけで英語と確定して [自動翻訳] を表示した後に、全文がほぼ日本語だと分かった状況を固定する。
-        # 日本語の行は、かなの数の3倍が英字の数以上という素通しの条件を満たす長さにする。
-        japanese = "状態はこちらです。コミットをプッシュして、レビューもおわりました。あとはマージをまつだけです。\n"
-        outputs = self.run_flushes([ENGLISH[0], japanese, ""])
-        self.assertEqual(outputs, [MARK, "", MOSTLY_JA_MARK + ENGLISH[0] + japanese])
+        # 日本語の行は翻訳に送らずに原文のまま表示し、インデントした行を含む英語の行だけを訳す。
+        received = self.root / "received.txt"
+        self.use_line_translator(received)
+        outputs = self.run_flushes([ENGLISH[0], MOSTLY_JAPANESE, ""])
+        expected = (ENGLISH[0].rstrip("\n") + " やく\n"
+                    + MOSTLY_JAPANESE.replace("before saving.", "before saving. やく"))
+        self.assertEqual(outputs, [MARK, "", expected])
+        self.assertIsNone(re.search("[\u3040-\u30ff\u4e00-\u9fff]", received.read_text(encoding="utf-8")))
+        self.assertIn("result=translated", self.log())
+
+    def test_rejects_a_translation_that_reorders_the_hidden_japanese_lines(self):
+        # 伏せ字の入れ替わりは各伏せ字が1回ずつ現れても起こり、そのまま戻すと日本語の行の順序が変わる。
+        self.use_line_translator(self.root / "received.txt", swap=True)
+        outputs = self.run_flushes([ENGLISH[0], MOSTLY_JAPANESE, ""])
+        self.assertEqual(outputs[2], FAIL_MARK + ENGLISH[0] + MOSTLY_JAPANESE)
+
+    def test_marks_a_mostly_japanese_message_with_no_english_line_to_translate(self):
+        marker = self.use_translator()
+        # 最初のflushが日本語の前で切れて英語と確定し、英語はその日本語の行の中にしか無い状況を固定する。
+        # 日本語の行を伏せると訳す英語が残らないので、翻訳を呼ばずに印を付けて原文を表示する。
+        deltas = ["Reviewing the pull request for the thinking note and README ",
+                  "の変更点を確認し、問題なければマージします。\n",
+                  "コミットをプッシュして、レビューもおわりました。あとはマージをまつだけです。\n", ""]
+        outputs = self.run_flushes(deltas)
+        self.assertEqual(outputs, [MARK, "", "", MOSTLY_JA_MARK + "".join(deltas)])
         self.assertFalse(marker.exists())
         self.assertIn("skipped_mostly_ja", self.log())
 

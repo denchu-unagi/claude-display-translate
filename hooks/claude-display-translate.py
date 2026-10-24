@@ -37,6 +37,8 @@ MAX_LENGTH_RATIO = 2
 LENGTH_SLACK_CHARS = 100
 LIST_ITEM_PATTERN = r"[ \t]*(?:[-*+]|\d+[.)])[ \t]"
 HEADING_PATTERN = r"#{1,6}[ \t]"
+# 日本語の行を伏せる際も行頭の字下げ・引用・リスト・見出しの記号は外に残し、訳文の構造を保つ。
+LINE_PREFIX_PATTERN = r"[ \t]*(?:>[ \t]*)*(?:(?:[-*+]|\d+[.)])[ \t]+)?(?:#{1,6}[ \t]+)?"
 # CommonMarkと同じく、同じ長さのバッククォート列同士だけを組にする。長さの違う列（行中の ``` と
 # 後続の ` など）を組にすると、間の英文をコードとみなし、それを訳した正しい訳文を不忠実と判定する。
 INLINE_CODE_PATTERN = r"(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)"
@@ -106,15 +108,16 @@ def prose_text(text):
         if line.startswith(("    ", "\t")) or re.match(HEADING_PATTERN, line):
             continue
         lines.append(line)
-    joined = "\n".join(lines)
-    joined = re.sub(INLINE_CODE_PATTERN, " ", joined)
-    joined = re.sub(URL_PATTERN, " ", joined)
-    return joined.split()
+    return body_tokens("\n".join(lines))
 
 
 def count_chars(text):
+    return count_tokens(prose_text(text))
+
+
+def count_tokens(tokens):
     kana = japanese = english = words = 0
-    for token in prose_text(text):
+    for token in tokens:
         letters = len(re.findall(LETTER_PATTERN, token))
         if re.search(SYMBOL_PATTERN, token):
             if letters:
@@ -125,6 +128,33 @@ def count_chars(text):
         kana += len(re.findall(KANA_CLASS, token))
         japanese += len(re.findall(JA_CLASS, token))
     return kana, japanese, english, words
+
+
+def split_line_prefix(line):
+    matched = re.match(LINE_PREFIX_PATTERN, line)
+    return line[:matched.end()], line[matched.end():]
+
+
+def body_tokens(body):
+    body = re.sub(INLINE_CODE_PATTERN, " ", body)
+    body = re.sub(URL_PATTERN, " ", body)
+    return body.split()
+
+
+def hide_japanese_line(line):
+    if not re.search(JA_CLASS, line):
+        return False
+    counts = count_tokens(body_tokens(split_line_prefix(line)[1]))
+    return classify(counts) == "ja" or counts[2] == 0
+
+
+def remaining_english(text):
+    # 伏せた行とコードの placeholder は訳す本文ではないので、英字数に数えない。
+    english = 0
+    for line in text.split("\n"):
+        body = re.sub(PLACEHOLDER_PATTERN, " ", split_line_prefix(line)[1])
+        english += count_tokens(body_tokens(body))[2]
+    return english
 
 
 def classify(counts):
@@ -176,8 +206,9 @@ def make_key(session_id, message_id):
     return "".join(c if (c.isascii() and c.isalnum()) or c == "-" else "_" for c in raw)
 
 
-def protect_code(text):
+def protect_code(text, hide_japanese=False):
     blocks = []
+    hidden = []
     used = {int(n) for n in re.findall(PLACEHOLDER_PATTERN, text)}
     base = 0
     while any(n in used for n in range(base, base + PLACEHOLDER_BASE_STEP)):
@@ -195,8 +226,20 @@ def protect_code(text):
         return PLACEHOLDER % (base + len(blocks) - 1)
 
     text = re.sub(FENCE_PATTERN, replace, text)
+    # 日本語の行は予約タグより先に伏せる。後に伏せると行の本文にタグの placeholder が入り、戻せなくなる。
+    if hide_japanese:
+        lines = text.split("\n")
+        for number, line in enumerate(lines):
+            if not hide_japanese_line(line):
+                continue
+            prefix, body = split_line_prefix(line)
+            blocks.append(body)
+            hidden.append(len(blocks) - 1)
+            lines[number] = prefix + PLACEHOLDER % (base + len(blocks) - 1)
+        text = "\n".join(lines)
     # 予約タグは場所によらず出現ごとに隠す。原文の区切りと衝突させず、タグに触れた文も訳す。
-    return re.sub("|".join(map(re.escape, RESERVED_TAGS)), replace_tag, text), blocks, base
+    text = re.sub("|".join(map(re.escape, RESERVED_TAGS)), replace_tag, text)
+    return text, blocks, base, hidden
 
 
 def restore_code(text, blocks, base):
@@ -316,8 +359,8 @@ def run_child(text):
     return translated
 
 
-def translate(full, lead):
-    protected, blocks, base = protect_code(full)
+def translate(full, lead, hide_japanese=False):
+    protected, blocks, base, hidden = protect_code(full, hide_japanese)
     started = time.monotonic()
     output = run_child("<source>\n" + protected + "\n</source>")
     elapsed = time.monotonic() - started
@@ -348,6 +391,14 @@ def translate(full, lead):
         counts = ["%d/%d" % pair for pair in zip(structure(protected), structure(text))]
         return fail("unfaithful", elapsed, blocks=counts[0], items=counts[1], heads=counts[2],
                     missing="".join(missing_pieces(protected, text)[:1]))
+    if hide_japanese:
+        # 各 placeholder が1回ずつ現れても入れ替わると日本語の行の順序が変わるため、出現順も比べる。
+        # 予約タグの placeholder は訳文の語順で動いてよいので、伏せた行の placeholder だけを比べる。
+        if ([int(n) for n in re.findall(PLACEHOLDER_PATTERN, text) if int(n) - base in hidden]
+                != [base + number for number in hidden]
+                or not all(re.search(r"(?m)^[ \t>#*+0-9.)-]*" + re.escape(PLACEHOLDER % (base + number)) + r"[ \t]*$", text)
+                           for number in hidden)):
+            return fail("placeholder", elapsed)
     restored = restore_code(text, blocks, base)
     if restored is None:
         return fail("placeholder", elapsed)
@@ -628,17 +679,27 @@ def final_output(key, index, delta, state):
     lead = lead + "\n" if lead else ""
     source = lead + full
     counts = count_chars(source)
+    hide_japanese = False
     if classify(counts) == "ja" and counts[0] * KANA_WEIGHT >= counts[2]:
-        log_event("skipped_mostly_ja", ja_chars=counts[1], en_words=counts[3])
-        # 言語確定済みなら非finalが [自動翻訳] を表示済みで取り消せないため、訳していないことを示す。
-        return full if state["prefix"] else MOSTLY_JA_MARK + full
-    if counts[2] == 0:
+        if state["prefix"]:
+            log_event("skipped_mostly_ja", ja_chars=counts[1], en_words=counts[3])
+            return full
+        # 言語確定済みなら非finalが [自動翻訳] を表示済みで取り消せない。日本語の行は言い換えを避けるため
+        # 翻訳に送らず英語の行だけを訳し、訳す英語がほとんど残らないときは訳していないことを印で示す。
+        protected = protect_code(source, True)[0]
+        if remaining_english(protected) < MIN_TRANSLATE_LETTERS:
+            log_event("skipped_mostly_ja", ja_chars=counts[1], en_words=counts[3])
+            return MOSTLY_JA_MARK + full
+        hide_japanese = True
+        length = len(protected)
+    else:
+        length = len(protect_code(source)[0])
+    if not hide_japanese and counts[2] == 0:
         return full
-    length = len(protect_code(source)[0])
     if length > MAX_TRANSLATE_CHARS:
         log_event("skipped_long", source_chars=length)
         return None if state["prefix"] else LONG_MARK + full
-    translated = translate(source, lead)
+    translated = translate(source, lead, hide_japanese)
     if translated is None:
         return FAIL_MARK + full
     return state["prefix"] + translated
