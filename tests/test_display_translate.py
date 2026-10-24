@@ -15,6 +15,7 @@ from unittest.mock import patch
 HOOK = Path(__file__).resolve().parent.parent / "hooks" / "claude-display-translate.py"
 MARK = "[自動翻訳]\n"
 FAIL_MARK = "[翻訳失敗: 原文を表示]\n"
+MOSTLY_JA_MARK = "[日本語が大半のため原文を表示]\n"
 SOURCE = "Approved. Committing, pushing, and updating the PR body."
 ENGLISH = [
     "The build failed because `npm ci` could not resolve a peer dependency.\n",
@@ -186,6 +187,19 @@ class ChildInvocationTest(HookTestCase):
                 with patch.dict(os.environ, self.env, clear=True):
                     self.assertEqual(runtime["translate"](source, ""), translation if shown else None)
 
+    def test_a_numbered_item_that_lost_its_space_gets_it_back(self):
+        # 子CLIは `2.（後で）` のように番号直後の空白を落とすことがあり、その訳文は空白を補って表示する。
+        # 全角数字の番号はリスト項目にならないので補わずに拒否し、`1.5倍` のような行は変えない。
+        source = "1. Build it.\n2. (later) Ship it.\n\n1.5x faster."
+        cases = (("1. ビルドする。\n2.（後で）出荷する。\n\n1.5倍速い。", "1. ビルドする。\n2. （後で）出荷する。\n\n1.5倍速い。"),
+                 ("1. ビルドする。\n２.（後で）出荷する。\n\n1.5倍速い。", None))
+        for translation, expected in cases:
+            with self.subTest(translation=translation):
+                self.use_child("print(%r)" % ("<translation>" + translation + "</translation>"))
+                runtime = self.runtime()
+                with patch.dict(os.environ, self.env, clear=True):
+                    self.assertEqual(runtime["translate"](source, ""), expected)
+
     def test_timeout_starts_cooldown_even_when_the_kill_fails(self):
         for kill_error in (None, PermissionError()):
             with self.subTest(kill_error=type(kill_error).__name__):
@@ -244,6 +258,16 @@ class TranslationFlowTest(HookTestCase):
         ])
         self.assertEqual(outputs, [None, None, None])
         self.assertFalse(marker.exists())
+
+    def test_marks_a_mostly_japanese_message_after_showing_the_translation_mark(self):
+        marker = self.use_translator()
+        # 1行目だけで英語と確定して [自動翻訳] を表示した後に、全文がほぼ日本語だと分かった状況を固定する。
+        # 日本語の行は、かなの数の3倍が英字の数以上という素通しの条件を満たす長さにする。
+        japanese = "状態はこちらです。コミットをプッシュして、レビューもおわりました。あとはマージをまつだけです。\n"
+        outputs = self.run_flushes([ENGLISH[0], japanese, ""])
+        self.assertEqual(outputs, [MARK, "", MOSTLY_JA_MARK + ENGLISH[0] + japanese])
+        self.assertFalse(marker.exists())
+        self.assertIn("skipped_mostly_ja", self.log())
 
     def test_does_not_repeat_a_line_shown_before_the_language_was_decided(self):
         self.use_translator()
