@@ -12,6 +12,7 @@ current_message = ""
 MARK = "[自動翻訳]\n"
 FAIL_MARK = "[翻訳失敗: 原文を表示]\n"
 LONG_MARK = "[長文のため原文を表示]\n"
+MOSTLY_JA_MARK = "[日本語が大半のため原文を表示]\n"
 MAX_TRANSLATE_CHARS = 8000
 RESERVED_TAGS = ("<source>", "</source>", "<translation>", "</translation>")
 CHILD_TIMEOUT = 45
@@ -340,6 +341,9 @@ def translate(full, lead):
             or text.count("<system-reminder>") > protected.count("<system-reminder>")
             or len(text) > len(protected) * MAX_LENGTH_RATIO + LENGTH_SLACK_CHARS):
         return fail("echoed_context", elapsed)
+    # 子CLIは `5.（保留）` のように番号直後の空白を落とすことがあり、CommonMarkではリスト項目にならない。
+    # 全角数字の番号はCommonMarkでもリスト項目にならないので、半角数字の番号だけを補う。
+    text = re.sub(r"(?m)^([ \t]*[0-9]+[.)])(?=[^\x00-\x7f])", r"\1 ", text)
     if not faithful(protected, text):
         counts = ["%d/%d" % pair for pair in zip(structure(protected), structure(text))]
         return fail("unfaithful", elapsed, blocks=counts[0], items=counts[1], heads=counts[2],
@@ -626,7 +630,8 @@ def final_output(key, index, delta, state):
     counts = count_chars(source)
     if classify(counts) == "ja" and counts[0] * KANA_WEIGHT >= counts[2]:
         log_event("skipped_mostly_ja", ja_chars=counts[1], en_words=counts[3])
-        return full
+        # 言語確定済みなら非finalが [自動翻訳] を表示済みで取り消せないため、訳していないことを示す。
+        return full if state["prefix"] else MOSTLY_JA_MARK + full
     if counts[2] == 0:
         return full
     length = len(protect_code(source)[0])
