@@ -136,6 +136,23 @@ class ChildInvocationTest(HookTestCase):
         self.assertIn(" result=no_japanese message=standalo-no-kana elapsed_sec=", line)
         self.assertTrue(line.endswith(" reply_head=" + json.dumps(head)), line)
 
+    def test_echoed_source_is_rejected_even_with_japanese_quote(self):
+        # 原文の日本語の引用にある仮名は訳した証拠にならない。原文をそのまま返した返答は翻訳失敗にし、
+        # 引用を残して訳した返答は訳文として表示する。
+        source = "The report adds a section named 「モデル別の集計」 and updates two files."
+        self.use_child("\n".join([
+            "import re, sys",
+            "sys.stdin.read()",
+            "prompt = open(sys.argv[sys.argv.index('--system-prompt-file') + 1], encoding='utf-8').read()",
+            "print('<translation>\\n' + re.search(r'<source>\\n(.*)\\n</source>', prompt, re.S).group(1) + '\\n</translation>')",
+            "",
+        ]))
+        self.assertEqual(self.flush(0, True, source, "echo-quote", "standalone"), FAIL_MARK + source)
+        self.assertIn(" result=no_japanese ", self.log())
+        translated = "「モデル別の集計」という節を追加し、2つのファイルを更新します。"
+        self.use_child("print(%r)" % ("<translation>\n" + translated + "\n</translation>"))
+        self.assertEqual(self.flush(0, True, source, "quote", "standalone"), MARK + translated)
+
     def test_child_error_is_classified_without_its_text_or_cooldown(self):
         self.use_child("import sys; print('SYNTHETIC_ERROR_DETAIL'); sys.exit(1)")
         self.assertIn("翻訳失敗", self.final_once("error"))

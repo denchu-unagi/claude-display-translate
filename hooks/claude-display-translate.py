@@ -374,8 +374,9 @@ def translate(full, lead, hide_japanese=False):
     wrapped = re.fullmatch(r"\s*```[^\n]*\n(.*)\n```\s*", text, re.S)
     if wrapped and not re.search(r"(?m)^```", wrapped.group(1)):
         text = wrapped.group(1) + "\n"
-    if not re.search(KANA_CLASS, text):
-        # 仮名の無い返答は再現しにくいため、原因を後から確かめられるよう先頭だけ記録する。
+    # 原文に無い仮名が返答に無ければ訳していないとみなす。原文の日本語の引用にある仮名は訳した証拠にならない。
+    if len(re.findall(KANA_CLASS, text)) <= len(re.findall(KANA_CLASS, protected)):
+        # 訳していない返答は再現しにくいため、原因を後から確かめられるよう先頭だけ記録する。
         return fail("no_japanese", elapsed, reply_head=text[:LOG_REPLY_HEAD_CHARS])
     # 子CLIが足した文脈を訳した出力は忠実性検査を通ることがあるため、訳文として表示しない。
     # 予約タグは保護時にplaceholderへ移したので、元に戻す前の訳文にあれば足された文脈を含む。
