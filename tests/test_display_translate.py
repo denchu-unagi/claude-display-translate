@@ -209,6 +209,8 @@ class ChildInvocationTest(HookTestCase):
                     self.assertEqual(runtime["translate"](source, ""), expected)
 
     def test_timeout_starts_cooldown_even_when_the_kill_fails(self):
+        # Popen を差し替えるので起動はしないが、claude が無い環境でも no_claude で止まらないよう起動コマンドを固定する。
+        self.use_child("")
         for kill_error in (None, PermissionError()):
             with self.subTest(kill_error=type(kill_error).__name__):
                 self.state = self.root / ("timeout-state-" + type(kill_error).__name__)
