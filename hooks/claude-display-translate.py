@@ -73,6 +73,56 @@ CHILD_ARGS = [
     "--tools", "", "--disable-slash-commands",
     "--output-format", "text",
 ]
+# 設定ファイルは別プロセスのgroupで実行し、期限が来たら孫プロセスごと止められるようにする。
+# 結果はdupしたfd 1へJSONで1回だけ書き、設定ファイルのprintや孫の出力が結果に混ざらないようにする。
+TRANSLATOR_RUNNER = """import importlib.util, json, os, re, sys, tempfile, types
+sys.pycache_prefix = os.path.join(tempfile.gettempdir(), "pycache")
+# モデルが from _cli import ... で読む共通部も、ソースの隣に残った古い .pyc ではなく今のソースを使うため、キャッシュの置き場を hook 専用の TMPDIR 配下に限る（-B なので書き込みもしない）。
+out = os.fdopen(os.dup(1), "w")
+os.dup2(2, 1)
+request = json.loads(sys.stdin.read())
+CONFIG_DIR = sys.argv[1]
+prompt = request["prompt"]
+timeout = request["timeout"]
+def load_module(name, path):
+    # import の仕組みは .pyc をキャッシュし、同じ秒・同じ長さの書き換えでは古い内容が使われるため、ソースを直接読んで実行する。
+    module = types.ModuleType(name)
+    module.__file__ = path
+    with open(path, "rb") as source:
+        exec(compile(source.read(), path, "exec"), module.__dict__)
+    return module
+try:
+    settings_path = os.path.join(CONFIG_DIR, "settings.py")
+    settings = load_module("msgdisp_settings", settings_path)
+    model = getattr(settings, "MODEL", None)
+    if not isinstance(model, str):
+        result = {"error": "BadModel", "timeout": False}
+    else:
+        model = model.strip()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", model):
+            result = {"error": "BadModel", "timeout": False}
+        else:
+            translators_dir = os.path.join(CONFIG_DIR, "translators")
+            model_path = os.path.join(translators_dir, model + ".py")
+            if not os.path.isfile(model_path):
+                result = {"error": "ModelNotFound", "timeout": False}
+            elif not os.path.realpath(model_path).startswith(os.path.realpath(translators_dir) + os.sep):
+                # symlink 経由で translators の外のファイルを指せないようにするため、実体の位置で判定する。
+                result = {"error": "BadModel", "timeout": False}
+            else:
+                sys.path.insert(0, translators_dir)
+                spec = importlib.util.spec_from_file_location("msgdisp_model", model_path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                translated = module.translate(prompt, timeout, settings)
+                if not isinstance(translated, str):
+                    raise TypeError()
+                result = {"translated": translated}
+except BaseException as exc:
+    result = {"error": type(exc).__name__, "timeout": isinstance(exc, TimeoutError)}
+out.write(json.dumps(result))
+out.flush()
+"""
 
 
 SECRET_PATTERN = re.compile(
@@ -284,8 +334,97 @@ def resolve_claude():
     return [installed] if installed else None
 
 
-def run_child(text):
+def config_dir():
+    from pathlib import Path
+
+    override = os.environ.get("MSGDISP_CONFIG_DIR")
+    if override:
+        return override
+    return str(Path(__file__).with_name("claude-display-translate"))
+
+
+def run_process(command, payload, timeout, env, stderr):
     import signal
+    import subprocess
+
+    # timeout時に孫processも同じgroupで停止する。
+    try:
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=stderr, env=env, start_new_session=True)
+    except Exception as exc:
+        return None, b"", b"", False, type(exc).__name__
+    timed_out = False
+    error = None
+    try:
+        stdout, errors = process.communicate(payload, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        stdout, errors = b"", b""
+    except Exception as exc:
+        error = type(exc).__name__
+        stdout, errors = b"", b""
+    if timed_out or error:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        # killに失敗しても戻れるよう、回収の待ちにも上限を置く。
+        try:
+            stdout, errors = process.communicate(
+                timeout=max(0.1, min(KILL_GRACE_SECONDS, HOOK_BUDGET_SECONDS - (time.monotonic() - STARTED))))
+        except Exception:
+            stdout, errors = b"", b""
+    return process, stdout, errors, timed_out, error
+
+
+def run_translator(directory, text, timeout, env, known_secrets):
+    import signal
+    import subprocess
+    import tempfile
+
+    started = time.monotonic()
+    # 設定ファイルの関数や孫CLIが止まらなくても、Claude Codeのhook timeoutより前に原文へ戻してcooldownを記録する。
+    # -I は、Claude Code が hook を project のディレクトリで起動し、そこにある json.py などが標準ライブラリより先に読まれるのを防ぐため。
+    # 設定ファイル側が自分で起動したCLIを自分のtimeoutで止める猶予を残すため、待ち時間はtimeoutよりKILL_GRACE_SECONDSだけ長くする。
+    request = json.dumps({"prompt": PROMPT + "\n\n" + text, "timeout": timeout})
+    # 設定ファイルが残した一時ファイルを強制停止時にも残さないため、専用のTMPDIRを用意して消す。
+    with tempfile.TemporaryDirectory() as temporary:
+        process, output, _, timed_out, error = run_process(
+            [sys.executable, "-I", "-B", "-c", TRANSLATOR_RUNNER, directory], request.encode("ascii"),
+            timeout + KILL_GRACE_SECONDS, dict(env, TMPDIR=temporary), subprocess.DEVNULL)
+        # 正常終了でも、設定ファイルが同じgroupに残した子・孫をまとめて止める。
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+    elapsed = time.monotonic() - started
+    if timed_out:
+        note_failure()
+        return fail("timeout", elapsed)
+    if process is None or error:
+        return fail("translator_error", elapsed, exception=error)
+    try:
+        outcome = json.loads(output.decode("utf-8"))
+    except ValueError:
+        outcome = None
+    if not isinstance(outcome, dict) or process.returncode != 0:
+        name = outcome.get("error") if isinstance(outcome, dict) else None
+        return fail("translator_error", elapsed, exception=name if isinstance(name, str) else "BadResult")
+    if outcome.get("timeout") is True:
+        note_failure()
+        return fail("timeout", elapsed)
+    if "error" in outcome:
+        return fail("translator_error", elapsed, exception=str(outcome["error"]))
+    translated = outcome.get("translated")
+    if not isinstance(translated, str):
+        return fail("translator_error", elapsed, exception="BadResult")
+    if SECRET_PATTERN.search(translated) or any(secret in translated for secret in known_secrets):
+        return fail("credential_in_output", elapsed)
+    return translated
+
+
+def run_child(text):
     import subprocess
     import tempfile
 
@@ -295,9 +434,6 @@ def run_child(text):
                      if os.environ.get(name) and len(os.environ[name]) >= 8]
     if SECRET_PATTERN.search(text) or any(secret in text for secret in known_secrets):
         return fail("credential_in_input")
-    command = resolve_claude()
-    if not command:
-        return fail("no_claude")
     # 端末アプリOrcaのagent hook連携と、親セッションのmessaging接続を子CLIへ引き継がない。
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("ORCA_", "CLAUDE_CODE_MESSAGING_"))
@@ -312,6 +448,12 @@ def run_child(text):
         return fail("invalid_timeout")
     if not timeout > 0:
         return fail("budget")
+    settings_path = os.path.join(config_dir(), "settings.py")
+    if os.path.isfile(settings_path):
+        return run_translator(config_dir(), text, timeout, env, known_secrets)
+    command = resolve_claude()
+    if not command:
+        return fail("no_claude")
     started = time.monotonic()
     # Claude Codeは子CLIのユーザーメッセージへメールアドレスや環境情報を自動で足す。原文を同じ
     # メッセージに入れるとHaikuがそれらを翻訳対象と取り違えるため、原文はsystem promptへ分ける。
@@ -319,32 +461,12 @@ def run_child(text):
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as prompt:
         prompt.write(PROMPT + "\n\n" + text)
         prompt.flush()
-        try:
-            # timeout時に孫processも同じgroupで停止する。
-            process = subprocess.Popen(command + CHILD_ARGS + ["--system-prompt-file", prompt.name],
-                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, env=env, start_new_session=True)
-        except Exception as exc:
-            return fail("spawn_error", exception=type(exc).__name__)
-        timed_out = False
-        error = None
-        try:
-            stdout, stderr = process.communicate(b"Translate the source.", timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-        except Exception as exc:
-            error = type(exc).__name__
-        if timed_out or error:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            try:
-                stdout, stderr = process.communicate(
-                    timeout=max(0.1, min(KILL_GRACE_SECONDS, HOOK_BUDGET_SECONDS - (time.monotonic() - STARTED))))
-            except Exception:
-                stdout, stderr = b"", b""
+        process, stdout, stderr, timed_out, error = run_process(
+            command + CHILD_ARGS + ["--system-prompt-file", prompt.name],
+            b"Translate the source.", timeout, env, subprocess.PIPE)
     elapsed = time.monotonic() - started
+    if process is None:
+        return fail("spawn_error", exception=error)
     # 短時間の失敗で後続の翻訳を止めないため、cooldownはtimeoutに限る。
     if timed_out:
         note_failure()
