@@ -1,2 +1,3 @@
 __pycache__/
 /benchmarks/
+/hooks/claude-display-translate/settings.py

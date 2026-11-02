@@ -1,0 +1,3 @@
+# このファイルを同じディレクトリに settings.py としてコピーし、MODEL を選んで使う。
+# MODEL は translators/ のファイル名から .py を除いたもの（haiku・luna から選ぶ）。
+MODEL = "haiku"
