@@ -51,6 +51,8 @@ class HookTestCase(unittest.TestCase):
         self.env = {k: v for k, v in os.environ.items()
                     if k not in ("MSGDISP_TRANSLATE_CHILD", "MSGDISP_CHILD_TIMEOUT")}
         self.env.update(MSGDISP_FORCE_ATTENDED="1", MSGDISP_STATE_DIR=str(self.state))
+        # 開発者の手元の翻訳の設定（hooks/claude-display-translate/settings.py）を既存テストが拾わないようにする。
+        self.env["MSGDISP_CONFIG_DIR"] = str(self.root / "no-config")
 
     def use_child(self, source):
         child = self.root / "claude.py"
