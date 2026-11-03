@@ -402,6 +402,18 @@ class BundledTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.cli.run_cli(failing, "", 10)
 
+    def test_run_cli_names_the_failure_cause(self):
+        # translate.log には例外の型名だけが残るので、原因ごとに型を分ける。文言は codex の失敗出力に合わせた。
+        for text, expected in (("You've hit your usage limit.", "QuotaExhausted"),
+                               ("unexpected status 429 Too Many Requests", "RateLimited"),
+                               ("unexpected status 401 Unauthorized: Missing bearer or basic authentication", "AuthFailed"),
+                               ("something else broke", "RuntimeError")):
+            with self.subTest(expected=expected):
+                failing = [sys.executable, "-c", "import sys; print(%r); sys.exit(1)" % text]
+                with self.assertRaises(RuntimeError) as caught:
+                    self.cli.run_cli(failing, "", 10)
+                self.assertEqual(type(caught.exception).__name__, expected)
+
     def test_run_cli_returns_even_when_the_kill_fails(self):
         sleeper = [sys.executable, "-c", "import time; time.sleep(5)"]
         started = time.monotonic()
@@ -529,6 +541,16 @@ class BundledTest(unittest.TestCase):
         with mock.patch.object(sarashina.urllib.request, "urlopen", side_effect=AssertionError("sent")), \
                 self.assertRaises(RuntimeError):
             sarashina.translate(prompt, 12, settings)
+
+    def test_sarashina_names_the_http_failure_cause(self):
+        sarashina, settings = self.load_sarashina()
+        for code, expected in ((401, "AuthFailed"), (429, "RateLimited"), (500, "RuntimeError")):
+            with self.subTest(code=code):
+                error = urllib.error.HTTPError("https://api.sarashina.ai/v1/translate", code, "error", {}, None)
+                with mock.patch.object(sarashina.urllib.request, "urlopen", side_effect=error), \
+                        self.assertRaises(RuntimeError) as caught:
+                    sarashina.translate(PROMPT, 12, settings)
+                self.assertEqual(type(caught.exception).__name__, expected)
 
     def test_sarashina_reports_a_connect_timeout_as_a_timeout(self):
         # hook は TimeoutError だけを時間切れとして扱い、翻訳を休む。

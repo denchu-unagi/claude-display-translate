@@ -5,6 +5,8 @@ import time
 import urllib.error
 import urllib.request
 
+from _cli import AuthFailed, RateLimited
+
 SARASHINA_URL = "https://api.sarashina.ai/v1/translate"
 SARASHINA_CHAT_URL = "https://api.sarashina.ai/v1/chat/completions"
 SARASHINA_MAX_CHARS = 5000
@@ -40,7 +42,9 @@ def post_sarashina(url, key, body, timeout):
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise RuntimeError("sarashina request failed: HTTP %s" % exc.code)
+        # translate.log には例外の型名だけが残るので、キーの誤りと回数制限を型で区別する。
+        failure = {401: AuthFailed, 429: RateLimited}.get(exc.code, RuntimeError)
+        raise failure("sarashina request failed: HTTP %s" % exc.code)
     except urllib.error.URLError as exc:
         # 接続段階の時間切れはURLErrorに包まれて届くので、cooldownのためTimeoutErrorにそろえる。
         if isinstance(exc.reason, TimeoutError):
