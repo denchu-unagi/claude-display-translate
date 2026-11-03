@@ -117,6 +117,25 @@ class ChildInvocationTest(HookTestCase):
         ]))
         self.assertIn("承認済み", self.final_once("success"))
 
+    def test_a_translation_with_a_word_in_another_script_is_rejected(self):
+        # 語がキリル文字などに化けた訳文は、仮名を含み構造も原文と同じなので、ほかの検査では止まらない。
+        for word, script in (("локаль", "cyrillic"), ("বাংলা", "bengali")):
+            with self.subTest(script=script):
+                self.use_child("print(%r)" % ("<translation>" + word + "承認済みです。コミット、push、PR本文の更新を行います。</translation>"))
+                shown = self.final_once("foreign-" + script)
+                self.assertTrue(shown.startswith(FAIL_MARK), shown)
+                self.assertIn("result=foreign_script", self.log())
+                self.assertIn("script=" + script, self.log())
+
+    def test_other_scripts_in_the_source_or_single_symbols_are_kept(self):
+        # 原文にある別の文字体系の語と、「β版」のような1文字の記号は、訳文に残ってよい。
+        self.use_translator()
+        shown = self.flush(0, True, "The UI label reads привет for new users of the beta.", "cyrillic", "standalone")
+        self.assertIn("привет", shown)
+        self.assertIn("やく", shown)
+        self.use_child("print(%r)" % "<translation>β版の承認済みです。コミット、push、PR本文の更新を行います。</translation>")
+        self.assertIn("β版", self.final_once("greek"))
+
     def test_output_that_translates_child_context_is_rejected(self):
         # 子CLIが足した文脈を訳した出力は、仮名と原文の断片があっても訳文として表示しない。
         echoes = ("<system-reminder>\nメールアドレスを参照できます。\n</system-reminder>\n" + SOURCE,

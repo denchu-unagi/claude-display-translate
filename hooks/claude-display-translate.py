@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 
 STARTED = time.monotonic()
 # ログ行から会話ログの該当メッセージを引けるよう、処理中のメッセージをログに記録する。
@@ -49,6 +50,8 @@ SYMBOL_PATTERN = r"[=;{}|<>$/\\]"
 LETTER_PATTERN = "[A-Za-z]"
 JA_CLASS = "[\u3040-\u30ff\u4e00-\u9fff]"
 KANA_CLASS = "[\u3040-\u30ff]"
+# 日本語の訳文に使う文字体系。文字の Unicode 名の先頭語で見分ける。
+JAPANESE_OR_LATIN = {"LATIN", "HIRAGANA", "KATAKANA", "KATAKANA-HIRAGANA", "CJK", "IDEOGRAPHIC", "FULLWIDTH", "HALFWIDTH"}
 FENCE_MARKER = r"[ \t]*(`{3,}|~{3,})"
 FENCE_PATTERN = r"(?ms)^([ \t]*)(`{3,}(?!`)|~{3,}(?!~))[^\n]*$.*?^[ \t]*\2[^\n]*$|^[ \t]*(?:`{3,}|~{3,})[^\n]*$.*\Z"
 STATE_NAME_PATTERN = r"[A-Za-z0-9_-]+\.(lang|closed|lock|\d{5}\.(seen|held))(\.tmp)?"
@@ -493,6 +496,24 @@ def run_child(text):
     return translated
 
 
+def script_of(char):
+    return unicodedata.name(char, "").split(" ")[0] if char.isalpha() else None
+
+
+def foreign_scripts(text):
+    # 「β版」「μs」のような記号的な1文字は通すため、同じ文字体系の文字が2つ以上続く語だけを数える。
+    found, previous = set(), None
+    for char in text:
+        # ベンガル文字の母音記号のような結合文字は、前の文字の一部なので数えずに読み飛ばす。
+        if unicodedata.category(char).startswith("M"):
+            continue
+        script = script_of(char)
+        if script and script == previous and script not in JAPANESE_OR_LATIN:
+            found.add(script)
+        previous = script
+    return found
+
+
 def translate(full, lead, hide_japanese=False):
     protected, blocks, base, hidden = protect_code(full, hide_japanese)
     started = time.monotonic()
@@ -512,6 +533,10 @@ def translate(full, lead, hide_japanese=False):
     if len(re.findall(KANA_CLASS, text)) <= len(re.findall(KANA_CLASS, protected)):
         # 訳していない返答は再現しにくいため、原因を後から確かめられるよう先頭だけ記録する。
         return fail("no_japanese", elapsed, reply_head=text[:LOG_REPLY_HEAD_CHARS])
+    # 語がキリル文字などに化けた訳文は、仮名を含み構造も原文と同じなので、原文に無い文字体系で見分ける。
+    foreign = sorted(foreign_scripts(text) - {script_of(char) for char in protected})
+    if foreign:
+        return fail("foreign_script", elapsed, script=foreign[0].lower())
     # 子CLIが足した文脈を訳した出力は忠実性検査を通ることがあるため、訳文として表示しない。
     # 予約タグは保護時にplaceholderへ移したので、元に戻す前の訳文にあれば足された文脈を含む。
     # 長さは原文の2倍に余裕を足した閾値で検査し、余裕は数文字の原文の正訳を通すために置く。
