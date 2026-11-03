@@ -260,16 +260,16 @@ python3 -m unittest discover tests
 
 ## 番外編: Sarashina で翻訳する
 
-[Sarashina](https://sarashina.ai/) は、ソフトバンク傘下の SB Intuitions が開発する国産の LLM です。`sarashina3-mini` などのモデルはフルスクラッチで開発されています。2026年11月時点では無償ベータ版として提供されていて、API も無料で使えます。
+[Sarashina](https://sarashina.ai/) は、ソフトバンク傘下の SB Intuitions が開発する国産の LLM です。2026年11月時点では無償ベータ版として提供されていて、API も無料で使えます。
 
 `MODEL = "sarashina"` にすると、`sarashina3-translate` の訳文を `sarashina3-mini` が2回見直します。
 
-1. 原文と照らし合わせて、意味の誤りだけを直します。`sarashina3-translate` だけでは重大な誤訳が残り、下の比較で不合格だったためです。
+1. 原文と照らし合わせて、意味の誤りだけを直します。`sarashina3-translate` だけでは誤訳が残り、下の比較で不合格だったためです。
 2. 文末の体言止め、直訳調の言い回し、主語と述語がかみ合わない文だけを直します。1だけでは下訳の文体が残り、`sarashina3-mini` 単体より得点が低かったためです。
 
 ### Haiku・Luna との比較
 
-[翻訳モデルの比較](#翻訳モデルの比較)と同じ英文と採点で比べた結果です。Sarashina の行の時間は、API を直接呼んだ時間です。
+[翻訳モデルの比較](#翻訳モデルの比較)と同じ英文と採点で比べた結果です。Sarashina のモデルの時間は、API を直接呼んだ時間です。
 
 | モデル | CLI | effort | 翻訳の中央値 | 得点（5段階） | 重大な誤訳 | 必須事実の欠落 | 判定 |
 |---|---|---|---|---|---|---|---|
@@ -280,8 +280,8 @@ python3 -m unittest discover tests
 | `sarashina3-translate` | Sarashina API | — | 1.27秒 | 3.67 | 3件 | 0件 | 不合格 |
 | `sarashina3.2-mini-thinking` | Sarashina API | low | 10.62秒 | 4.31 | 1件 | 0件 | 不合格 |
 
-- `sarashina3-translate` + `sarashina3-mini` の行は `sarashina` で測りました。`sarashina3-mini` の2回の見直しは temperature 0.1 で動かします。API の既定値の 0.7 では、同じ英文でも回によって直し漏れや余計な言い換えが出たためです。
-- `sarashina3-mini` と `sarashina3.2-mini-thinking` の行は、hook の翻訳指示をそのまま渡し、temperature などを API の既定値のまま測った参考値です。`sarashina3.2-mini-thinking` は effort を low にしました。この2行は `MODEL` では選べません。
+- `sarashina3-translate` + `sarashina3-mini` は `sarashina` で測りました。`sarashina3-mini` の2回の見直しは temperature 0.1 で動かします。API の既定値の 0.7 では、同じ英文でも回によって直し漏れや余計な言い換えが出たためです。
+- `sarashina3-mini` と `sarashina3.2-mini-thinking` は、hook の翻訳指示をそのまま渡し、temperature などを API の既定値のまま測った参考値です。`sarashina3.2-mini-thinking` は effort を low にしました。この2つは `MODEL` では選べません。
 
 ### Sarashina を使うときの注意
 
