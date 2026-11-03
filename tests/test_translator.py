@@ -1,5 +1,6 @@
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import sys
 import tempfile
 import time
 import types
+import urllib.error
 from unittest import mock
 import unittest
 
@@ -379,7 +381,7 @@ class BundledTest(unittest.TestCase):
     def test_the_settings_sample_defaults_to_haiku(self):
         settings = load("settings_sample_check", SETTINGS_SAMPLE)
         self.assertEqual(settings.MODEL, "haiku")
-        self.assertEqual(sorted(p.stem for p in TRANSLATORS.glob("[!_]*.py")), ["haiku", "luna"])
+        self.assertEqual(sorted(p.stem for p in TRANSLATORS.glob("[!_]*.py")), ["haiku", "luna", "sarashina"])
 
     def test_run_cli_passes_stdin_and_stops_on_timeout(self):
         echo = [sys.executable, "-c", "import sys; print(sys.stdin.read().upper())"]
@@ -433,6 +435,47 @@ class BundledTest(unittest.TestCase):
             # argv は /proc から他のユーザーにも読めるので、原文を載せない。
             self.assertEqual(prompt, PROMPT)
             self.assertFalse(any("Hello" in arg for arg in argv))
+
+    def load_sarashina(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        key_file = Path(directory.name) / "api-key"
+        key_file.write_text("test-key-0123\n", encoding="utf-8")
+        return load("sarashina_check", TRANSLATORS / "sarashina.py"), types.SimpleNamespace(SARASHINA_API_KEY_FILE=str(key_file))
+
+    def test_sarashina_drafts_with_the_translate_api_and_reviews_with_mini(self):
+        sarashina, settings = self.load_sarashina()
+        requests = []
+        replies = [{"translated_text": "こんにちは [[[CODE1000]]]  "},
+                   {"choices": [{"message": {"content": "<translation>\nやく\n</translation>"}}]}]
+
+        def urlopen(request, timeout):
+            requests.append((request.get_header("Authorization"), json.loads(request.data), timeout))
+            return io.BytesIO(json.dumps(replies[len(requests) - 1]).encode("utf-8"))
+
+        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
+            self.assertEqual(sarashina.translate(PROMPT, 12, settings), "<translation>\nやく\n</translation>")
+        (authorization, draft_body, _), (_, review_body, review_timeout) = requests
+        # キーのファイルの末尾の改行は落とし、翻訳 API には指示を含めず原文だけを送る。
+        self.assertEqual(authorization, "Bearer test-key-0123")
+        self.assertEqual(draft_body, {"text": "Hello [[[CODE1000]]]", "source_lang": "en", "target_lang": "ja"})
+        self.assertEqual((review_body["model"], review_body["temperature"]), ("sarashina3-mini", 0.1))
+        self.assertIn("<draft>\nこんにちは [[[CODE1000]]]\n</draft>", review_body["messages"][1]["content"])
+        self.assertLessEqual(review_timeout, 12)
+
+    def test_sarashina_does_not_send_a_source_that_contains_the_key(self):
+        sarashina, settings = self.load_sarashina()
+        prompt = "Instructions.\n\n<source>\nThe key is test-key-0123\n</source>"
+        with mock.patch.object(sarashina.urllib.request, "urlopen", side_effect=AssertionError("sent")), \
+                self.assertRaises(RuntimeError):
+            sarashina.translate(prompt, 12, settings)
+
+    def test_sarashina_reports_a_connect_timeout_as_a_timeout(self):
+        # hook は TimeoutError だけを時間切れとして扱い、翻訳を休む。
+        sarashina, settings = self.load_sarashina()
+        with mock.patch.object(sarashina.urllib.request, "urlopen", side_effect=urllib.error.URLError(TimeoutError())), \
+                self.assertRaises(TimeoutError):
+            sarashina.translate(PROMPT, 12, settings)
 
 
 if __name__ == "__main__":
