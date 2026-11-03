@@ -140,5 +140,10 @@ def translate(prompt, timeout, settings):
     # 翻訳APIの訳文に残る条件・状態の取り違えを、照合で減らすため。
     text = ask_mini(key, SARASHINA_REVIEW_PROMPT, mini_source, text, timeout - (time.monotonic() - started))
     # 照合だけでは翻訳APIの体言止めや直訳調が残り、sarashina3-mini単体より得点が下がったため、文体だけを整える。
-    text = ask_mini(key, SARASHINA_POLISH_PROMPT, mini_source, text, timeout - (time.monotonic() - started))
+    # 長文では文体の整えが時間内に終わらないことがあり、そのときは原文表示より読める照合済みの訳文を返す。
+    # 照合の時間から間に合うかを予測すると、間に合う整えまで省くため、実際に時間切れになったときだけ省く。
+    try:
+        text = ask_mini(key, SARASHINA_POLISH_PROMPT, mini_source, text, timeout - (time.monotonic() - started))
+    except TimeoutError:
+        pass
     return "<translation>\n" + restore_pieces(text, urls) + "\n</translation>"

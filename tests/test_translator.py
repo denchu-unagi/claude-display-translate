@@ -558,18 +558,41 @@ class BundledTest(unittest.TestCase):
     def test_sarashina_passes_the_remaining_time_and_stops_when_it_runs_out(self):
         sarashina, settings = self.load_sarashina()
         timeouts = []
-        replies = [{"translated_text": "やく"}, {"choices": [{"message": {"content": "<translation>\nやく\n</translation>"}}]}]
+        replies = [{"translated_text": "やく"}, {"choices": [{"message": {"content": "<translation>\nしょうごう\n</translation>"}}]}]
 
         def urlopen(request, timeout):
             timeouts.append(timeout)
             return io.BytesIO(json.dumps(replies[len(timeouts) - 1]).encode("utf-8"))
 
         # 開始、照合の前、文体の整えの前に時計を読む。照合のあとで12秒を使い切ったことにする。
+        # 文体の整えは呼ばず、照合済みの訳文を返す。
         with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen), \
-                mock.patch.object(sarashina.time, "monotonic", side_effect=[100.0, 103.0, 112.0]), \
+                mock.patch.object(sarashina.time, "monotonic", side_effect=[100.0, 103.0, 112.0]):
+            self.assertEqual(sarashina.translate(PROMPT, 12, settings), "<translation>\nしょうごう\n</translation>")
+        self.assertEqual(timeouts, [12, 9.0])
+        # 照合までに使い切ったときは、hook が翻訳を休めるよう時間切れのまま返す。
+        with mock.patch.object(sarashina.urllib.request, "urlopen", return_value=io.BytesIO(b'{"translated_text": "x"}')), \
+                mock.patch.object(sarashina.time, "monotonic", side_effect=[100.0, 112.0]), \
                 self.assertRaises(TimeoutError):
             sarashina.translate(PROMPT, 12, settings)
-        self.assertEqual(timeouts, [12, 9.0])
+
+    def test_sarashina_returns_the_reviewed_draft_when_polishing_times_out(self):
+        # 文体の整えの応答待ちで時間切れになっても、照合済みの訳文を URL を戻して返す。
+        sarashina, settings = self.load_sarashina()
+        prompt = "Instructions.\n\n<source>\nSee https://example.com/a for details.\n</source>"
+        replies = iter([io.BytesIO(json.dumps({"translated_text": "詳細は [[[CODE0]]] を参照。"}).encode("utf-8")),
+                        io.BytesIO(json.dumps({"choices": [{"message": {"content": "<translation>\n詳細は [[[CODE0]]] を参照してください。\n</translation>"}}]}).encode("utf-8")),
+                        TimeoutError()])
+
+        def urlopen(request, timeout):
+            reply = next(replies)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
+            self.assertEqual(sarashina.translate(prompt, 12, settings),
+                             "<translation>\n詳細は https://example.com/a を参照してください。\n</translation>")
 
     def test_sarashina_does_not_send_a_source_that_contains_the_key(self):
         sarashina, settings = self.load_sarashina()
