@@ -184,7 +184,7 @@ Claude Code の公式ドキュメントと同じ流れで、
    mkdir -p ~/.claude/hooks/claude-display-translate/translators
    base=https://raw.githubusercontent.com/denchu-unagi/claude-display-translate/main/hooks/claude-display-translate
    curl -fsSL "$base/settings.py.sample" -o ~/.claude/hooks/claude-display-translate/settings.py
-   for f in _cli.py haiku.py luna.py; do
+   for f in _cli.py haiku.py luna.py sarashina.py; do
      curl -fsSL "$base/translators/$f" -o ~/.claude/hooks/claude-display-translate/translators/$f
    done
    ```
@@ -197,6 +197,7 @@ Claude Code の公式ドキュメントと同じ流れで、
    |---|---|---|---|
    | `haiku` | Claude Code（`claude -p`） | `claude-haiku-5-5`（effort low） | Claude Code |
    | `luna` | Codex CLI（`codex exec`） | `gpt-6-luna`（effort low） | Codex CLI へのログイン |
+   | `sarashina` | Sarashina API | `sarashina3-translate` で訳し、`sarashina3-mini` で照合 | [Sarashina API のキー](#sarashina-の-api-キー) |
 
 3. **次のメッセージから、書き換えた設定で翻訳する**
 
@@ -207,6 +208,23 @@ Claude Code の公式ドキュメントと同じ流れで、
 - 翻訳する文は、選んだモデルの提供元へ送られます。
 - [注意](#注意)に書いた翻訳に送る前の検査、timeout 後に翻訳を休む動作、訳文の検査は、どのモデルでも hook が行います。
 - 設定ファイルとモデルのファイルは Python の隔離モード（`python3 -I`）で実行します。`PYTHONPATH` などの `PYTHON` で始まる環境変数、作業ディレクトリにあるモジュール、ユーザーの site-packages（`pip install --user` で入れたもの）は読み込みません。書き換えた内容がすぐに使われるよう、Python のキャッシュ（`.pyc`）は作らず、既にあるキャッシュも読みません。
+
+### Sarashina の API キー
+
+`sarashina` は、`sarashina3-translate` の訳文を `sarashina3-mini` が原文と照らし合わせ、意味の誤りだけを直します。
+
+1. [API コンソール](https://chat.sarashina.ai/dashboard/api-keys)でキーを発行します。
+2. Claude Code の外の端末で次を実行し、表示されたプロンプトにキーを貼り付けます。入力は画面に表示されず、自分だけが読めるファイル `~/.config/sarashina/api-key` に保存されます。
+
+   ```bash
+   ( umask 077; mkdir -p ~/.config/sarashina; printf 'Sarashina API key: '; read -rs key; echo; printf '%s\n' "$key" > ~/.config/sarashina/api-key )
+   ```
+
+- キーを Claude Code に貼り付けたり、このファイルを Claude Code に読ませたりしないでください。Claude Code が読んだキーは Anthropic に送られます。さらに `haiku` や `luna` に切り替えているときに Claude の返答にキーが含まれると、この hook がその提供元へも送ります。
+- キーを別のファイルに置くときは、`settings.py` に `SARASHINA_API_KEY_FILE = "<ファイルのパス>"` を書きます。
+- 原文にキーの値が含まれるときは、Sarashina に送らずに `[翻訳失敗: 原文を表示]` を付けて原文を表示します。
+- Sarashina API の無償ベータでは、送った文章がモデルの学習に使われることがあります。
+- 閉じたコードブロックを除いて5000文字を超える原文は、Sarashina API が受け付けないため、`[翻訳失敗: 原文を表示]` を付けて原文を表示します。
 
 ## 状態とログ
 
