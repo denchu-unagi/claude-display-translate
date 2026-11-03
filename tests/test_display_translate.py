@@ -358,6 +358,18 @@ class LockRaceTest(HookTestCase):
     def test_a_non_final_flush_that_loses_the_race_to_the_final_close_shows_its_line_once(self):
         self.use_translator()
         self.assertEqual(self.flush(0, False, ENGLISH[0]), MARK)
+        self.assertIsNone(self.flush_while_closing(1, ENGLISH[1]))
+        final = self.flush(2, True, "")
+        self.assertIn("やく", final)
+        self.assertNotIn("`bun test`", final)
+
+    def test_an_undecided_flush_that_loses_the_race_to_the_final_close_leaves_no_seen_file(self):
+        # 言語未確定の短い行。finalのcleanup後にseenを書くと、本文入りのファイルが次のGCまで残る。
+        self.assertIsNone(self.flush_while_closing(0, "Done.\n"))
+        self.assertEqual(list(self.state.glob("*.seen")), [])
+
+    def flush_while_closing(self, index, delta):
+        self.state.mkdir(exist_ok=True)
         # finalがmessage単位のlockを先に取ってclosedを作る順序を、外からlockを保持して固定する。
         key = str(self.state / "session1-message-1")
         holder = subprocess.Popen([sys.executable, "-c", "\n".join([
@@ -372,8 +384,8 @@ class LockRaceTest(HookTestCase):
         self.assertTrue(ready, "lock holder did not start")
         self.assertEqual(holder.stdout.readline(), "locked\n")
         # 閉じたstdinへのcommunicateは古いPythonでValueErrorになるため、入力はファイルから渡す。
-        request = self.root / "flush-1.json"
-        request.write_text(payload("message-1", 1, False, ENGLISH[1]), encoding="utf-8")
+        request = self.root / "flush.json"
+        request.write_text(payload("message-1", index, False, delta), encoding="utf-8")
         with request.open(encoding="utf-8") as stdin:
             waiting = subprocess.Popen([sys.executable, "-B", str(HOOK)], stdin=stdin, stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE, env=self.env, text=True)
@@ -390,10 +402,7 @@ class LockRaceTest(HookTestCase):
         holder.wait(timeout=WAIT_SECONDS)
         stdout, _ = waiting.communicate(timeout=WAIT_SECONDS)
         self.assertEqual(waiting.returncode, 0)
-        self.assertIsNone(displayed(stdout))
-        final = self.flush(2, True, "")
-        self.assertIn("やく", final)
-        self.assertNotIn("`bun test`", final)
+        return displayed(stdout)
 
 
 class StateDirectoryTest(HookTestCase):
