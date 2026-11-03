@@ -482,7 +482,7 @@ class BundledTest(unittest.TestCase):
         sarashina, settings = self.load_sarashina()
         # hook が inline code の欠落を検査する規則とずれると、検査で落ちる inline code を守れない。
         hook = runpy.run_path(str(HOOK), run_name="hook_check")
-        for name in ("INLINE_CODE_PATTERN", "PLACEHOLDER", "PLACEHOLDER_PATTERN"):
+        for name in ("INLINE_CODE_PATTERN", "URL_PATTERN", "URL_TRAILING_PUNCTUATION", "PLACEHOLDER", "PLACEHOLDER_PATTERN"):
             self.assertEqual(getattr(sarashina, name), hook[name])
         prompt = "Instructions.\n\n<source>\nRun `make` then [[[CODE1000]]] and `make test`.\n</source>"
         requests = []
@@ -501,6 +501,42 @@ class BundledTest(unittest.TestCase):
         self.assertEqual(requests[0]["text"], "Run [[[CODE1001]]] then [[[CODE1000]]] and [[[CODE1002]]].")
         self.assertIn("<draft>\n`make test` の前に [[[CODE1000]]] と `make` を実行します。\n</draft>",
                       requests[1]["messages"][1]["content"])
+
+    def test_sarashina_keeps_urls_away_from_the_api_and_the_reviews(self):
+        # URL を欠かす段は特定できていないので、翻訳 API にも2回の見直しにも URL を見せず、最後に戻す。
+        sarashina, settings = self.load_sarashina()
+        prompt = "Instructions.\n\n<source>\nSee https://example.com/a. Run `curl https://example.com/b`.\n</source>"
+        requests = []
+        replies = [{"translated_text": "[[[CODE0]]] を参照し、[[[CODE1]]] を実行します。"},
+                   {"choices": [{"message": {"content": "<translation>\n[[[CODE0]]] を見て、`curl https://example.com/b` を実行します。\n</translation>"}}]},
+                   {"choices": [{"message": {"content": "<translation>\n[[[CODE0]]] を見てから `curl https://example.com/b` を実行します。\n</translation>"}}]}]
+
+        def urlopen(request, timeout):
+            requests.append(json.loads(request.data))
+            return io.BytesIO(json.dumps(replies[len(requests) - 1]).encode("utf-8"))
+
+        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
+            self.assertEqual(sarashina.translate(prompt, 12, settings),
+                             "<translation>\nhttps://example.com/a を見てから `curl https://example.com/b` を実行します。\n</translation>")
+        # 文末の句読点は placeholder の外に残す。inline code の中の URL は inline code ごと伏せる。
+        self.assertEqual(requests[0]["text"], "See [[[CODE0]]]. Run [[[CODE1]]].")
+        for body in requests[1:]:
+            self.assertIn("<source>\nSee [[[CODE0]]]. Run `curl https://example.com/b`.\n</source>",
+                          body["messages"][1]["content"])
+            self.assertNotIn("example.com/a", body["messages"][1]["content"])
+
+    def test_sarashina_fails_when_a_review_drops_or_repeats_a_url(self):
+        sarashina, settings = self.load_sarashina()
+        prompt = "Instructions.\n\n<source>\nSee https://example.com/a for details.\n</source>"
+        for polished in ("詳細を参照してください。", "[[[CODE0]]] と [[[CODE0]]] を参照してください。"):
+            replies = [{"translated_text": "詳細は [[[CODE0]]] を参照してください。"},
+                       {"choices": [{"message": {"content": "<translation>\n詳細は [[[CODE0]]] を参照してください。\n</translation>"}}]},
+                       {"choices": [{"message": {"content": "<translation>\n" + polished + "\n</translation>"}}]}]
+            responses = iter(io.BytesIO(json.dumps(reply).encode("utf-8")) for reply in replies)
+            with self.subTest(polished=polished), \
+                    mock.patch.object(sarashina.urllib.request, "urlopen", lambda request, timeout: next(responses)), \
+                    self.assertRaises(RuntimeError):
+                sarashina.translate(prompt, 12, settings)
 
     def test_sarashina_fails_when_inline_code_does_not_come_back_once(self):
         sarashina, settings = self.load_sarashina()

@@ -44,6 +44,7 @@ LINE_PREFIX_PATTERN = r"[ \t]*(?:>[ \t]*)*(?:(?:[-*+]|\d+[.)])[ \t]+)?(?:#{1,6}[
 # 後続の ` など）を組にすると、間の英文をコードとみなし、それを訳した正しい訳文を不忠実と判定する。
 INLINE_CODE_PATTERN = r"(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)"
 URL_PATTERN = r"https?://[^\s<>()\[\]]+"
+URL_TRAILING_PUNCTUATION = ".,;:"
 MIN_JA_CHARS = 2
 KANA_WEIGHT = 3
 SYMBOL_PATTERN = r"[=;{}|<>$/\\]"
@@ -247,7 +248,7 @@ def missing_pieces(source, translated):
         # 中身にASCII（空白を含む）が無いものに限り、バッククォートを除いた中身が訳文にあれば欠落とみなさない。
         # そのため句読点だけのinline codeは、言及ごと訳文から消えても検出できない。
         pieces.append(inner if not any(c.isascii() for c in inner) else match.group(0))
-    pieces += [url.rstrip(".,;:") for url in re.findall(URL_PATTERN, source)]
+    pieces += [url.rstrip(URL_TRAILING_PUNCTUATION) for url in re.findall(URL_PATTERN, source)]
     return [piece for piece in pieces if piece not in translated]
 
 
