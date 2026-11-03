@@ -748,16 +748,23 @@ def handle_non_final(key, index, delta):
             value = "ja" if verdict == "ja" else "en %d" % index
             lang = parse_lang(value) if create_lang(key, value) else read_lang(key)
         if lang is None:
-            write_state(batch_path(key, index, "seen"), delta)
+            write_batch_unless_closed(key, index, "seen", delta)
             return
     if lang[0] == "ja":
         return
+    if write_batch_unless_closed(key, index, "held", delta):
+        emit(MARK if index == lang[1] else "")
+
+
+def write_batch_unless_closed(key, index, kind, delta):
+    # seenもheldと同じくlock下でclosedを確かめる。finalのcleanup後に書くと、本文入りのファイルが
+    # 次のGCまで残る。
     with locked(key):
         if os.path.exists(state_path(key, "closed")):
             log_event("late", index=index)
-            return
-        write_state(batch_path(key, index, "held"), delta)
-    emit(MARK if index == lang[1] else "")
+            return False
+        write_state(batch_path(key, index, kind), delta)
+    return True
 
 
 def wait_for_batches(key, index, limit=FINAL_WAIT_SECONDS, poll=FINAL_POLL_SECONDS, any_lang=False):
