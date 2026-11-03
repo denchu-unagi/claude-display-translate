@@ -482,7 +482,7 @@ class BundledTest(unittest.TestCase):
         sarashina, settings = self.load_sarashina()
         # hook が inline code の欠落を検査する規則とずれると、検査で落ちる inline code を守れない。
         hook = runpy.run_path(str(HOOK), run_name="hook_check")
-        for name in ("INLINE_CODE_PATTERN", "URL_PATTERN", "PLACEHOLDER", "PLACEHOLDER_PATTERN"):
+        for name in ("INLINE_CODE_PATTERN", "URL_PATTERN", "URL_TRAILING_PUNCTUATION", "PLACEHOLDER", "PLACEHOLDER_PATTERN"):
             self.assertEqual(getattr(sarashina, name), hook[name])
         prompt = "Instructions.\n\n<source>\nRun `make` then [[[CODE1000]]] and `make test`.\n</source>"
         requests = []

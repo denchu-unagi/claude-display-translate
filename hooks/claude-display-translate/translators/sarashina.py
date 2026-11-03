@@ -14,8 +14,9 @@ SARASHINA_KEY_FILE = "~/.config/sarashina/api-key"
 SARASHINA_REVIEW_MODEL = "sarashina3-mini"
 # hook の INLINE_CODE_PATTERN・PLACEHOLDER と同じ規則。hook は同じ規則で inline code の欠落を検査する。
 INLINE_CODE_PATTERN = r"(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)"
-# hook の URL_PATTERN と同じ規則。hook は末尾の .,;: を除いた URL が訳文にあるかを検査する。
+# hook の URL_PATTERN・URL_TRAILING_PUNCTUATION と同じ規則。hook は末尾の句読点を除いた URL が訳文にあるかを検査する。
 URL_PATTERN = r"https?://[^\s<>()\[\]]+"
+URL_TRAILING_PUNCTUATION = ".,;:"
 PLACEHOLDER = "[[[CODE%d]]]"
 PLACEHOLDER_PATTERN = r"\[\[\[CODE(\d+)\]\]\]"
 SARASHINA_REVIEW_PROMPT = (
@@ -71,12 +72,13 @@ def protect_code_and_urls(text):
         if match.group(1):
             codes[number] = match.group(0)
             return PLACEHOLDER % number
-        # 文末の句読点は訳させる。hook も URL 末尾の .,;: を除いて検査する。
-        url = match.group(0).rstrip(".,;:")
+        # 文末の句読点は訳させる。hook も URL 末尾の句読点を除いて検査する。
+        url = match.group(0).rstrip(URL_TRAILING_PUNCTUATION)
         urls[number] = url
         return PLACEHOLDER % number + match.group(0)[len(url):]
 
     # inline code を先に照合し、バッククォートの中の URL は inline code として扱う。URL_PATTERN は閉じのバッククォートまで取り込むため。
+    # 逆に URL の直後に空白なしで続く inline code は URL ごと伏せ、mini にも見せない。
     return re.sub(INLINE_CODE_PATTERN + "|" + URL_PATTERN, replace, text), codes, urls
 
 
