@@ -195,6 +195,39 @@ class ModelFileTest(HookTestCase):
         self.assert_shows_original(outputs, "timeout")
         self.assertTrue((self.state / "last-failure").is_file())
 
+    def test_sarashina_returns_the_reviewed_draft_before_the_hook_deadline(self):
+        # 起動と設定の読み込みに hook の猶予（1秒）より長くかかり、文体の整えが自分の timeout を超えて止まらなくても、
+        # hook の期限より前に照合済みの訳文を返し、cooldown に入らない。
+        target = self.config / "translators"
+        for name in ("_cli.py", "sarashina.py"):
+            (target / name).write_text((TRANSLATORS / name).read_text(encoding="utf-8"), encoding="utf-8")
+        key = self.root / "api-key"
+        key.write_text("test-key-0123\n", encoding="utf-8")
+        self.use_settings("sarashina", "\n".join([
+            "SARASHINA_API_KEY_FILE = %r" % str(key),
+            "import io, json, re, time, urllib.request",
+            "time.sleep(1.5)",
+            "def reply(value):",
+            "    return io.BytesIO(json.dumps(value).encode('utf-8'))",
+            "def urlopen(request, timeout):",
+            "    body = json.loads(request.data)",
+            "    if 'text' in body:",
+            "        return reply({'translated_text': '\\n'.join(l + ' やく' if l else l for l in body['text'].split('\\n'))})",
+            "    draft = re.search(r'<draft>\\n(.*)\\n</draft>', body['messages'][1]['content'], re.S).group(1)",
+            "    if '校閲者' in body['messages'][0]['content']:",
+            "        return reply({'choices': [{'message': {'content': '<translation>\\n' + draft + ' しょうごう\\n</translation>'}}]})",
+            "    time.sleep(timeout + 30)",
+            "urllib.request.urlopen = urlopen",
+            "",
+        ]))
+        self.env["MSGDISP_CHILD_TIMEOUT"] = "2"
+        started = time.monotonic()
+        outputs = self.run_flushes([*ENGLISH, ""])
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertIn("しょうごう", outputs[2])
+        self.assertIn("result=translated", self.log())
+        self.assertFalse((self.state / "last-failure").exists())
+
     def test_a_translator_that_overruns_its_timeout_is_cut_off(self):
         # 設定ファイルの関数が止まらなくても、Claude Code の hook timeout より前に原文へ戻し cooldown に入る。
         self.env["MSGDISP_CHILD_TIMEOUT"] = "1"
@@ -565,15 +598,15 @@ class BundledTest(unittest.TestCase):
             timeouts.append(timeout)
             return io.BytesIO(json.dumps(replies[len(timeouts) - 1]).encode("utf-8"))
 
-        # 開始、照合の前、文体の整えの前に時計を読む。文体の整えには、照合済みの訳文を返す余裕の2秒を残して渡す。
+        # 開始、照合の前、文体の整えの前に時計を読み、各段に残り時間を渡す。
         with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen), \
                 mock.patch.object(sarashina.time, "monotonic", side_effect=[100.0, 103.0, 105.0]):
             self.assertEqual(sarashina.translate(PROMPT, 12, settings), "<translation>\nととのえ\n</translation>")
-        self.assertEqual(timeouts, [12, 9.0, 5.0])
-        # 余裕の2秒しか残っていなければ、文体の整えは呼ばず、照合済みの訳文を返す。
+        self.assertEqual(timeouts, [12, 9.0, 7.0])
+        # 照合のあとで使い切ったときは、文体の整えを呼ばず、照合済みの訳文を返す。
         timeouts.clear()
         with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen), \
-                mock.patch.object(sarashina.time, "monotonic", side_effect=[100.0, 103.0, 110.0]):
+                mock.patch.object(sarashina.time, "monotonic", side_effect=[100.0, 103.0, 112.0]):
             self.assertEqual(sarashina.translate(PROMPT, 12, settings), "<translation>\nしょうごう\n</translation>")
         self.assertEqual(timeouts, [12, 9.0])
         # 照合までに使い切ったときは、hook が翻訳を休めるよう時間切れのまま返す。
