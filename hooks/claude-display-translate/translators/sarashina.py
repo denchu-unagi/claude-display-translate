@@ -17,6 +17,12 @@ SARASHINA_REVIEW_PROMPT = (
     "Markdown の構造、[[[CODEn]]] の形の文字列、インラインコード、URL、ファイルパス、コマンド名、識別子、すでに日本語の部分はそのまま残してください。"
     "直した訳文の全体を <translation> と </translation> で囲んで返し、その前後には何も書かないでください。"
 )
+SARASHINA_POLISH_PROMPT = (
+    "あなたは日本語の校正者です。<source> の英文の日本語訳 <draft> を、意味を変えずに日本語として自然な文に整えてください。"
+    "直すのは、文末の体言止め、直訳調の言い回し、主語と述語がかみ合わない文だけです。それ以外の言い回しは変えないでください。"
+    "Markdown の構造、[[[CODEn]]] の形の文字列、インラインコード、URL、ファイルパス、コマンド名、識別子、すでに日本語の部分はそのまま残してください。"
+    "整えた訳文の全体を <translation> と </translation> で囲んで返し、その前後には何も書かないでください。"
+)
 
 
 def post_sarashina(url, key, body, timeout):
@@ -45,6 +51,25 @@ def trim_trailing_spaces(source, text):
     return "\n".join(line.rstrip(" \t") for line in text.split("\n"))
 
 
+def ask_mini(key, instructions, source, draft, timeout):
+    if timeout <= 0:
+        raise TimeoutError()
+    reply = post_sarashina(SARASHINA_CHAT_URL, key, {
+        "model": SARASHINA_REVIEW_MODEL,
+        "messages": [
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": "<source>\n" + source + "\n</source>\n<draft>\n" + draft + "\n</draft>"},
+        ],
+        # 既定の0.7では、同じ英文でも回によって直し漏れや余計な言い換えが出たため。
+        "temperature": 0.1,
+    }, timeout)
+    content = reply["choices"][0]["message"]["content"]
+    tagged = re.fullmatch(r"\s*<translation>\n?(.*?)\n?</translation>\s*", content, re.S)
+    if tagged is None:
+        raise RuntimeError("sarashina3-mini reply is not tagged")
+    return tagged.group(1)
+
+
 def translate(prompt, timeout, settings):
     started = time.monotonic()
     path = getattr(settings, "SARASHINA_API_KEY_FILE", SARASHINA_KEY_FILE)
@@ -67,21 +92,7 @@ def translate(prompt, timeout, settings):
                           timeout)
     text = trim_trailing_spaces(source.group(1), body["translated_text"])
     # 翻訳APIの訳文に残る条件・状態の取り違えを、照合で減らすため。
-    remaining = timeout - (time.monotonic() - started)
-    if remaining <= 0:
-        raise TimeoutError()
-    reply = post_sarashina(SARASHINA_CHAT_URL, key, {
-        "model": SARASHINA_REVIEW_MODEL,
-        "messages": [
-            {"role": "system", "content": SARASHINA_REVIEW_PROMPT},
-            {"role": "user",
-             "content": "<source>\n" + source.group(1) + "\n</source>\n<draft>\n" + text + "\n</draft>"},
-        ],
-        # 既定の0.7では、同じ英文でも回によって直し漏れや余計な言い換えが出たため。
-        "temperature": 0.1,
-    }, remaining)
-    content = reply["choices"][0]["message"]["content"]
-    tagged = re.fullmatch(r"\s*<translation>\n?(.*?)\n?</translation>\s*", content, re.S)
-    if tagged is None:
-        raise RuntimeError("review reply is not tagged")
-    return "<translation>\n" + tagged.group(1) + "\n</translation>"
+    text = ask_mini(key, SARASHINA_REVIEW_PROMPT, source.group(1), text, timeout - (time.monotonic() - started))
+    # 照合だけでは翻訳APIの体言止めや直訳調が残り、sarashina3-mini単体より得点が下がったため、文体だけを整える。
+    text = ask_mini(key, SARASHINA_POLISH_PROMPT, source.group(1), text, timeout - (time.monotonic() - started))
+    return "<translation>\n" + text + "\n</translation>"
