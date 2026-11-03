@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -463,6 +464,48 @@ class BundledTest(unittest.TestCase):
         self.assertIn("<draft>\nしょうごう\n</draft>", polish_body["messages"][1]["content"])
         for body in (review_body, polish_body):
             self.assertEqual((body["model"], body["temperature"]), ("sarashina3-mini", 0.1))
+
+    def test_sarashina_keeps_inline_code_away_from_the_translation_api(self):
+        # 翻訳 API は inline code の識別子まで訳すので、placeholder にして送り、照合の前に元へ戻す。
+        sarashina, settings = self.load_sarashina()
+        # hook が inline code の欠落を検査する規則とずれると、検査で落ちる inline code を守れない。
+        hook = runpy.run_path(str(HOOK), run_name="hook_check")
+        for name in ("INLINE_CODE_PATTERN", "PLACEHOLDER", "PLACEHOLDER_PATTERN"):
+            self.assertEqual(getattr(sarashina, name), hook[name])
+        prompt = "Instructions.\n\n<source>\nRun `make` then [[[CODE1000]]] and `make test`.\n</source>"
+        requests = []
+        # 訳文で語順が入れ替わっても、番号どおりの inline code へ戻す。
+        replies = [{"translated_text": "[[[CODE1002]]] の前に [[[CODE1000]]] と [[[CODE1001]]] を実行します。"},
+                   {"choices": [{"message": {"content": "<translation>\nやく\n</translation>"}}]},
+                   {"choices": [{"message": {"content": "<translation>\nやく\n</translation>"}}]}]
+
+        def urlopen(request, timeout):
+            requests.append(json.loads(request.data))
+            return io.BytesIO(json.dumps(replies[len(requests) - 1]).encode("utf-8"))
+
+        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
+            sarashina.translate(prompt, 12, settings)
+        # hook が伏せたコードブロックの番号とは衝突させない。
+        self.assertEqual(requests[0]["text"], "Run [[[CODE1001]]] then [[[CODE1000]]] and [[[CODE1002]]].")
+        self.assertIn("<draft>\n`make test` の前に [[[CODE1000]]] と `make` を実行します。\n</draft>",
+                      requests[1]["messages"][1]["content"])
+
+    def test_sarashina_fails_when_inline_code_does_not_come_back_once(self):
+        sarashina, settings = self.load_sarashina()
+        prompt = "Instructions.\n\n<source>\nRun `a` and `b`.\n</source>"
+        # 欠落、総数が同じままの欠落と重複、欠落のない重複のどれも戻さない。
+        for draft in ("[[[CODE0]]] を実行します。", "[[[CODE0]]] と [[[CODE0]]] を実行します。",
+                      "[[[CODE0]]] と [[[CODE1]]] と [[[CODE1]]] を実行します。"):
+            reply = io.BytesIO(json.dumps({"translated_text": draft}).encode("utf-8"))
+            with self.subTest(draft=draft), \
+                    mock.patch.object(sarashina.urllib.request, "urlopen", return_value=reply), \
+                    self.assertRaises(RuntimeError):
+                sarashina.translate(prompt, 12, settings)
+        # 原文は5000文字以内でも、置き換えで5000文字を超えるなら送らない。
+        prompt = "Instructions.\n\n<source>\n" + "`a` " * 1000 + "\n</source>"
+        with mock.patch.object(sarashina.urllib.request, "urlopen", side_effect=AssertionError("sent")), \
+                self.assertRaises(RuntimeError):
+            sarashina.translate(prompt, 12, settings)
 
     def test_sarashina_passes_the_remaining_time_and_stops_when_it_runs_out(self):
         sarashina, settings = self.load_sarashina()
