@@ -309,4 +309,4 @@ python3 -m unittest discover tests
 
 [MIT](LICENSE)
 
-Anthropic とは関係のない非公式ツールです。
+Anthropic・OpenAI・SB Intuitions とは関係のない非公式ツールです。
