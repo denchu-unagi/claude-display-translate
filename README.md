@@ -213,7 +213,7 @@ Claude Code の公式ドキュメントと同じ流れで、
    設定ファイルは翻訳のたびに読み込むので、Claude Code の再起動は要りません。`settings.py` を削除すると、既定の Haiku での翻訳に戻ります。
 
 - ほかのモデルを使うときは、`translators/` に新しい名前のファイルを置いて `translate(prompt, timeout, settings)` を定義し、`MODEL` にそのファイル名から `.py` を除いた名前（英小文字・数字・`-` だけ。先頭は英小文字か数字）を書きます。`prompt` は hook の翻訳指示と原文（`<source>` と `</source>` の間）を含む文字列、`timeout` は使ってよい秒数、`settings` は `settings.py` の変数です。訳文は `<translation>` と `</translation>` で囲んだ文字列で返します。`timeout` 秒で終わらないときは `TimeoutError` を送出すると、ほかの時間切れと同じく翻訳を5分休みます。`MODEL` にパスは指定できません。`MODEL` が指すファイルの実体（シンボリックリンク経由を含む）が `translators/` の外にあるときは実行しません。`haiku` は組み込みの Haiku を使う名前なので、`translators/haiku.py` を置いても読みません。モデルのファイルが中で読み込むものは制限しません。同梱のファイルは、取り直すと上書きされます。
-- `MODEL` の名前が不正なときや、`translators/` にそのファイルが無いときは、`[翻訳失敗: 原文を表示]` を付けて原文を表示し、`translate.log` に `translator_error` を記録します。モデルのファイルで起きた例外（CLI の異常終了を含む）も同じく `translator_error` として、例外の型名だけを記録します。`haiku` の失敗は、`settings.py` を置かないときと同じく、利用枠切れなどの原因ごとに記録します。
+- `MODEL` の名前が不正なときや、`translators/` にそのファイルが無いときは、`[翻訳失敗: 原文を表示]` を付けて原文を表示し、`translate.log` に `translator_error` を記録します。モデルのファイルで起きた例外（CLI の異常終了を含む）も同じく `translator_error` として、例外の型名だけを記録します。同梱の `luna` は、利用枠切れ・回数制限・認証の失敗を、それぞれ `QuotaExhausted`・`RateLimited`・`AuthFailed` という型名で記録します。`sarashina` は、HTTP 429 を `RateLimited`、401 を `AuthFailed` として記録します。`haiku` の失敗は、`settings.py` を置かないときと同じく、利用枠切れなどの原因ごとに記録します。
 - 翻訳する文は、選んだモデルの提供元へ送られます。
 - [注意](#注意)に書いた翻訳に送る前の検査、timeout 後に翻訳を休む動作、訳文の検査は、どのモデルでも hook が行います。
 - 設定ファイルとモデルのファイルは Python の隔離モード（`python3 -I`）で実行します。`PYTHONPATH` などの `PYTHON` で始まる環境変数、作業ディレクトリにあるモジュール、ユーザーの site-packages（`pip install --user` で入れたもの）は読み込みません。書き換えた内容がすぐに使われるよう、Python のキャッシュ（`.pyc`）は作らず、既にあるキャッシュも読みません。

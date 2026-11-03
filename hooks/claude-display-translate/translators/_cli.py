@@ -1,6 +1,27 @@
 import json
+import re
 import subprocess
 import tempfile
+
+
+class QuotaExhausted(RuntimeError):
+    pass
+
+
+class RateLimited(RuntimeError):
+    pass
+
+
+class AuthFailed(RuntimeError):
+    pass
+
+
+# hook の _failure と同じ判定。translators は hook を import できない別プロセスで動くため複製する。
+FAILURES = (
+    (re.compile(r"session limit|usage limit|quota|insufficient credits"), QuotaExhausted),
+    (re.compile(r"rate.?limit|too many requests|\b429\b"), RateLimited),
+    (re.compile(r"unauthorized|unauthorised|authentication|invalid api key|\b401\b"), AuthFailed),
+)
 
 
 def run_cli(argv, stdin_text, timeout, cwd=None, env=None):
@@ -22,7 +43,10 @@ def run_cli(argv, stdin_text, timeout, cwd=None, env=None):
             pass
         raise TimeoutError()
     if process.returncode != 0:
-        raise RuntimeError("command failed: exit code %d" % process.returncode)
+        # translate.log には例外の型名だけが残るので、原因を型で区別する。
+        text = (stdout + stderr).decode("utf-8", "replace").lower()
+        failure = next((kind for pattern, kind in FAILURES if pattern.search(text)), RuntimeError)
+        raise failure("command failed: exit code %d" % process.returncode)
     return stdout.decode("utf-8", "replace")
 
 
