@@ -10,6 +10,10 @@ SARASHINA_CHAT_URL = "https://api.sarashina.ai/v1/chat/completions"
 SARASHINA_MAX_CHARS = 5000
 SARASHINA_KEY_FILE = "~/.config/sarashina/api-key"
 SARASHINA_REVIEW_MODEL = "sarashina3-mini"
+# hook の INLINE_CODE_PATTERN・PLACEHOLDER と同じ規則。hook は同じ規則で inline code の欠落を検査する。
+INLINE_CODE_PATTERN = r"(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)"
+PLACEHOLDER = "[[[CODE%d]]]"
+PLACEHOLDER_PATTERN = r"\[\[\[CODE(\d+)\]\]\]"
 SARASHINA_REVIEW_PROMPT = (
     "あなたは英日翻訳の校閲者です。<source> の英文と <draft> の日本語訳を比べ、"
     "意味が変わっている箇所（否定・条件・数値・主語・状態や完了の有無・合否などの取り違え、抜け、付け足し）だけを直してください。"
@@ -51,6 +55,28 @@ def trim_trailing_spaces(source, text):
     return "\n".join(line.rstrip(" \t") for line in text.split("\n"))
 
 
+def protect_inline_code(text):
+    # 原文にある placeholder（hook が伏せたコードブロックなど）より大きい番号を使い、衝突させない。
+    start = max(map(int, re.findall(PLACEHOLDER_PATTERN, text)), default=-1) + 1
+    codes = []
+
+    def replace(match):
+        codes.append(match.group(0))
+        return PLACEHOLDER % (start + len(codes) - 1)
+
+    return re.sub(INLINE_CODE_PATTERN, replace, text), codes, start
+
+
+def restore_inline_code(text, codes, start):
+    # 総数だけ比べると、1つが消えて別の1つが重複した訳文を通してしまうため、番号ごとに1回あることを確かめる。
+    for number, code in enumerate(codes, start):
+        placeholder = PLACEHOLDER % number
+        if text.count(placeholder) != 1:
+            raise RuntimeError("the translation API dropped or repeated inline code")
+        text = text.replace(placeholder, code)
+    return text
+
+
 def ask_mini(key, instructions, source, draft, timeout):
     if timeout <= 0:
         raise TimeoutError()
@@ -84,13 +110,15 @@ def translate(prompt, timeout, settings):
     # 無償ベータでは送った文章が学習に使われることがあるため、キーを含む原文は送らない。
     if key in source.group(1):
         raise RuntimeError("source contains the API key")
-    # APIが5000文字を超える入力を400で拒否するため、呼ばずに失敗させる。
-    if len(source.group(1)) > SARASHINA_MAX_CHARS:
+    # 翻訳APIは指示を受け取れず、inline code の識別子まで訳すことがあるため、placeholder に置き換えて送る。
+    protected, codes, start = protect_inline_code(source.group(1))
+    # APIが5000文字を超える入力を400で拒否するため、呼ばずに失敗させる。置き換えで長くなることがあるので、送る文字列で数える。
+    if len(protected) > SARASHINA_MAX_CHARS:
         raise RuntimeError("source is longer than %d characters" % SARASHINA_MAX_CHARS)
     body = post_sarashina(SARASHINA_URL, key,
-                          {"text": source.group(1), "source_lang": "en", "target_lang": "ja"},
+                          {"text": protected, "source_lang": "en", "target_lang": "ja"},
                           timeout)
-    text = trim_trailing_spaces(source.group(1), body["translated_text"])
+    text = restore_inline_code(trim_trailing_spaces(source.group(1), body["translated_text"]), codes, start)
     # 翻訳APIの訳文に残る条件・状態の取り違えを、照合で減らすため。
     text = ask_mini(key, SARASHINA_REVIEW_PROMPT, source.group(1), text, timeout - (time.monotonic() - started))
     # 照合だけでは翻訳APIの体言止めや直訳調が残り、sarashina3-mini単体より得点が下がったため、文体だけを整える。
