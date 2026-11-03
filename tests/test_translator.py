@@ -443,10 +443,11 @@ class BundledTest(unittest.TestCase):
         key_file.write_text("test-key-0123\n", encoding="utf-8")
         return load("sarashina_check", TRANSLATORS / "sarashina.py"), types.SimpleNamespace(SARASHINA_API_KEY_FILE=str(key_file))
 
-    def test_sarashina_drafts_with_the_translate_api_and_reviews_with_mini(self):
+    def test_sarashina_drafts_reviews_and_polishes(self):
         sarashina, settings = self.load_sarashina()
         requests = []
         replies = [{"translated_text": "こんにちは [[[CODE1000]]]  "},
+                   {"choices": [{"message": {"content": "<translation>\nしょうごう\n</translation>"}}]},
                    {"choices": [{"message": {"content": "<translation>\nやく\n</translation>"}}]}]
 
         def urlopen(request, timeout):
@@ -455,13 +456,32 @@ class BundledTest(unittest.TestCase):
 
         with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
             self.assertEqual(sarashina.translate(PROMPT, 12, settings), "<translation>\nやく\n</translation>")
-        (authorization, draft_body, _), (_, review_body, review_timeout) = requests
+        (authorization, draft_body, _), (_, review_body, _), (_, polish_body, _) = requests
         # キーのファイルの末尾の改行は落とし、翻訳 API には指示を含めず原文だけを送る。
         self.assertEqual(authorization, "Bearer test-key-0123")
         self.assertEqual(draft_body, {"text": "Hello [[[CODE1000]]]", "source_lang": "en", "target_lang": "ja"})
-        self.assertEqual((review_body["model"], review_body["temperature"]), ("sarashina3-mini", 0.1))
+        self.assertEqual(review_body["messages"][0]["content"], sarashina.SARASHINA_REVIEW_PROMPT)
         self.assertIn("<draft>\nこんにちは [[[CODE1000]]]\n</draft>", review_body["messages"][1]["content"])
-        self.assertLessEqual(review_timeout, 12)
+        self.assertEqual(polish_body["messages"][0]["content"], sarashina.SARASHINA_POLISH_PROMPT)
+        self.assertIn("<draft>\nしょうごう\n</draft>", polish_body["messages"][1]["content"])
+        for body in (review_body, polish_body):
+            self.assertEqual((body["model"], body["temperature"]), ("sarashina3-mini", 0.1))
+
+    def test_sarashina_passes_the_remaining_time_and_stops_when_it_runs_out(self):
+        sarashina, settings = self.load_sarashina()
+        timeouts = []
+        replies = [{"translated_text": "やく"}, {"choices": [{"message": {"content": "<translation>\nやく\n</translation>"}}]}]
+
+        def urlopen(request, timeout):
+            timeouts.append(timeout)
+            return io.BytesIO(json.dumps(replies[len(timeouts) - 1]).encode("utf-8"))
+
+        # 開始、照合の前、文体の整えの前に時計を読む。照合のあとで12秒を使い切ったことにする。
+        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen), \
+                mock.patch.object(sarashina.time, "monotonic", side_effect=[100.0, 103.0, 112.0]), \
+                self.assertRaises(TimeoutError):
+            sarashina.translate(PROMPT, 12, settings)
+        self.assertEqual(timeouts, [12, 9.0])
 
     def test_sarashina_does_not_send_a_source_that_contains_the_key(self):
         sarashina, settings = self.load_sarashina()
