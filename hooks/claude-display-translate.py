@@ -120,7 +120,7 @@ try:
                 spec = importlib.util.spec_from_file_location("msgdisp_model", model_path)
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
-                # 親は起動前に決めた期限で止めるため、起動と設定・モデルの読み込みにかかった時間を持ち時間から除く。
+                # 親は子の起動前に期限を決め、強制終了はその KILL_GRACE_SECONDS 後以降になる。この期限に合わせ、起動と設定・モデルの読み込みにかかった時間を持ち時間から除く。
                 # time.monotonic はプロセスをまたいで同じ時計（Linux の CLOCK_MONOTONIC）を読む。
                 timeout = request["deadline"] - time.monotonic()
                 if timeout <= 0:
