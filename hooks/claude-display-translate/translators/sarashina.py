@@ -12,6 +12,9 @@ SARASHINA_CHAT_URL = "https://api.sarashina.ai/v1/chat/completions"
 SARASHINA_MAX_CHARS = 5000
 SARASHINA_KEY_FILE = "~/.config/sarashina/api-key"
 SARASHINA_REVIEW_MODEL = "sarashina3-mini"
+# 文体の整えを打ち切ってから照合済みの訳文を返すまでの余裕。hook は起動から timeout + 1秒で止める。
+# urllib の timeout は接続と受信の操作ごとにかかり、接続（実測0.25〜0.7秒）の分だけ timeout を超えうるため、1秒では足りない。
+POLISH_RETURN_MARGIN_SECONDS = 2
 # hook の INLINE_CODE_PATTERN・PLACEHOLDER と同じ規則。hook は同じ規則で inline code の欠落を検査する。
 INLINE_CODE_PATTERN = r"(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)"
 # hook の URL_PATTERN・URL_TRAILING_PUNCTUATION と同じ規則。hook は末尾の句読点を除いた URL が訳文にあるかを検査する。
@@ -143,7 +146,8 @@ def translate(prompt, timeout, settings):
     # 長文では文体の整えが時間内に終わらないことがあり、そのときは原文表示より読める照合済みの訳文を返す。
     # 照合の時間から間に合うかを予測すると、間に合う整えまで省くため、実際に時間切れになったときだけ省く。
     try:
-        text = ask_mini(key, SARASHINA_POLISH_PROMPT, mini_source, text, timeout - (time.monotonic() - started))
+        text = ask_mini(key, SARASHINA_POLISH_PROMPT, mini_source, text,
+                        timeout - (time.monotonic() - started) - POLISH_RETURN_MARGIN_SECONDS)
     except TimeoutError:
         pass
     return "<translation>\n" + restore_pieces(text, urls) + "\n</translation>"

@@ -558,16 +558,22 @@ class BundledTest(unittest.TestCase):
     def test_sarashina_passes_the_remaining_time_and_stops_when_it_runs_out(self):
         sarashina, settings = self.load_sarashina()
         timeouts = []
-        replies = [{"translated_text": "やく"}, {"choices": [{"message": {"content": "<translation>\nしょうごう\n</translation>"}}]}]
+        replies = [{"translated_text": "やく"}, {"choices": [{"message": {"content": "<translation>\nしょうごう\n</translation>"}}]},
+                   {"choices": [{"message": {"content": "<translation>\nととのえ\n</translation>"}}]}]
 
         def urlopen(request, timeout):
             timeouts.append(timeout)
             return io.BytesIO(json.dumps(replies[len(timeouts) - 1]).encode("utf-8"))
 
-        # 開始、照合の前、文体の整えの前に時計を読む。照合のあとで12秒を使い切ったことにする。
-        # 文体の整えは呼ばず、照合済みの訳文を返す。
+        # 開始、照合の前、文体の整えの前に時計を読む。文体の整えには、照合済みの訳文を返す余裕の2秒を残して渡す。
         with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen), \
-                mock.patch.object(sarashina.time, "monotonic", side_effect=[100.0, 103.0, 112.0]):
+                mock.patch.object(sarashina.time, "monotonic", side_effect=[100.0, 103.0, 105.0]):
+            self.assertEqual(sarashina.translate(PROMPT, 12, settings), "<translation>\nととのえ\n</translation>")
+        self.assertEqual(timeouts, [12, 9.0, 5.0])
+        # 余裕の2秒しか残っていなければ、文体の整えは呼ばず、照合済みの訳文を返す。
+        timeouts.clear()
+        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen), \
+                mock.patch.object(sarashina.time, "monotonic", side_effect=[100.0, 103.0, 110.0]):
             self.assertEqual(sarashina.translate(PROMPT, 12, settings), "<translation>\nしょうごう\n</translation>")
         self.assertEqual(timeouts, [12, 9.0])
         # 照合までに使い切ったときは、hook が翻訳を休めるよう時間切れのまま返す。
