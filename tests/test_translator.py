@@ -4,7 +4,6 @@ import io
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -44,12 +43,13 @@ class ModelFileTest(HookTestCase):
         (self.config / "translators" / (name + ".py")).write_text(body, encoding="utf-8")
         self.use_settings(name, extra)
 
-    def use_bundled(self, model, cli_suffix=""):
+    def use_bundled_cli(self, cli_suffix=""):
+        # 同梱の _cli の run_cli で、CLAUDE_CODE_EXECPATH の偽 CLI を起動するモデルを置く。
         target = self.config / "translators"
         (target / "_cli.py").write_text((TRANSLATORS / "_cli.py").read_text(encoding="utf-8") + cli_suffix,
                                         encoding="utf-8")
-        shutil.copy(TRANSLATORS / (model + ".py"), target / (model + ".py"))
-        self.use_settings(model)
+        self.use_model("import os\nfrom _cli import run_cli\ndef translate(prompt, timeout, settings):\n"
+                       "    return run_cli([os.environ['CLAUDE_CODE_EXECPATH']], '', timeout)\n", name="cli-model")
 
     def use_fake_claude(self, pid_file):
         fake = self.root / "fake-claude"
@@ -104,6 +104,15 @@ class ModelFileTest(HookTestCase):
         self.assertEqual(outputs[:2], [MARK, ""])
         self.assertIn("やく", outputs[2])
         self.assertIn("`npm ci`", outputs[2])
+        self.assertTrue(marker.exists())
+
+    def test_the_haiku_model_uses_the_builtin_haiku(self):
+        marker = self.use_translator()
+        # translators/haiku.py を置いても読まないことを、読まれたら失敗するファイルで確かめる。
+        self.use_model("raise SystemExit(5)\n", name="haiku")
+        self.use_settings(" haiku ")
+        outputs = self.run_flushes([*ENGLISH, ""])
+        self.assertIn("やく", outputs[2])
         self.assertTrue(marker.exists())
 
     def test_the_model_name_may_have_hyphens_and_surrounding_whitespace(self):
@@ -216,11 +225,10 @@ class ModelFileTest(HookTestCase):
         self.assert_process_ends(pid_file)
 
     @unittest.skipUnless(Path("/proc/self/stat").exists(), "needs /proc")
-    def test_the_bundled_haiku_stops_its_cli_on_timeout(self):
-        # 同梱の haiku と _cli をそのまま使い、CLAUDE_CODE_EXECPATH の偽 claude が止まらない場合を確かめる。
+    def test_the_bundled_run_cli_stops_its_cli_on_timeout(self):
         pid_file = self.root / "claude.pid"
         self.use_fake_claude(pid_file)
-        self.use_bundled("haiku")
+        self.use_bundled_cli()
         self.env["MSGDISP_CHILD_TIMEOUT"] = "1"
         started = time.monotonic()
         outputs = self.run_flushes([*ENGLISH, ""])
@@ -233,7 +241,7 @@ class ModelFileTest(HookTestCase):
         # 同梱の run_cli の期限を延ばし、hook の期限が先に来る経路を同梱のコードで再現する。
         pid_file = self.root / "claude.pid"
         self.use_fake_claude(pid_file)
-        self.use_bundled("haiku", "\n".join([
+        self.use_bundled_cli("\n".join([
             "",
             "_run_cli = run_cli",
             "def run_cli(argv, stdin_text, timeout, cwd=None, env=None):",
@@ -381,7 +389,7 @@ class BundledTest(unittest.TestCase):
     def test_the_settings_sample_defaults_to_haiku(self):
         settings = load("settings_sample_check", SETTINGS_SAMPLE)
         self.assertEqual(settings.MODEL, "haiku")
-        self.assertEqual(sorted(p.stem for p in TRANSLATORS.glob("[!_]*.py")), ["haiku", "luna", "sarashina"])
+        self.assertEqual(sorted(p.stem for p in TRANSLATORS.glob("[!_]*.py")), ["luna", "sarashina"])
 
     def test_run_cli_passes_stdin_and_stops_on_timeout(self):
         echo = [sys.executable, "-c", "import sys; print(sys.stdin.read().upper())"]
@@ -406,35 +414,24 @@ class BundledTest(unittest.TestCase):
         reported = self.cli.run_cli([sys.executable, "-c", "import os; print(os.getpgrp())"], "", 10)
         self.assertEqual(int(reported), os.getpgrp())
 
-    def test_haiku_and_luna_call_their_cli_with_the_prompt_in_a_file(self):
+    def test_luna_calls_codex_with_the_prompt_in_a_file(self):
         calls = []
 
         def run_cli(argv, stdin_text, timeout, cwd=None, env=None):
-            if "--system-prompt-file" in argv:
-                path = argv[argv.index("--system-prompt-file") + 1]
-                reply = "<translation>\nやく\n</translation>\n"
-            else:
-                path = json.loads(next(a for a in argv if a.startswith("model_instructions_file=")).split("=", 1)[1])
-                reply = json.dumps({"type": "item.completed",
-                                    "item": {"type": "agent_message", "text": "<translation>\nやく\n</translation>"}}) + "\n"
+            path = json.loads(next(a for a in argv if a.startswith("model_instructions_file=")).split("=", 1)[1])
             calls.append((argv, stdin_text, timeout, Path(path).read_text(encoding="utf-8")))
-            return reply
+            return json.dumps({"type": "item.completed",
+                               "item": {"type": "agent_message", "text": "<translation>\nやく\n</translation>"}}) + "\n"
 
-        with mock.patch.object(self.cli, "run_cli", run_cli), mock.patch.dict(os.environ, {"CLAUDE_CODE_EXECPATH": ""}):
-            haiku = load("haiku_check", TRANSLATORS / "haiku.py")
+        with mock.patch.object(self.cli, "run_cli", run_cli):
             luna = load("luna_check", TRANSLATORS / "luna.py")
-            self.assertIn("やく", haiku.translate(PROMPT, 12, types.SimpleNamespace()))
             self.assertIn("やく", luna.translate(PROMPT, 12, types.SimpleNamespace()))
-        (claude_argv, claude_stdin, claude_timeout, claude_prompt), (codex_argv, _, _, codex_prompt) = calls
-        self.assertEqual(claude_argv[claude_argv.index("--model") + 1], "claude-haiku-5-5")
-        self.assertEqual(claude_argv[claude_argv.index("--effort") + 1], "low")
-        self.assertEqual(claude_stdin, "Translate the source.")
-        self.assertEqual(claude_timeout, 12)
-        self.assertIn("gpt-6-luna", codex_argv)
-        for argv, prompt in ((claude_argv, claude_prompt), (codex_argv, codex_prompt)):
-            # argv は /proc から他のユーザーにも読めるので、原文を載せない。
-            self.assertEqual(prompt, PROMPT)
-            self.assertFalse(any("Hello" in arg for arg in argv))
+        (argv, stdin_text, timeout, prompt), = calls
+        self.assertIn("gpt-6-luna", argv)
+        self.assertEqual((stdin_text, timeout), ("Translate the source.", 12))
+        # argv は /proc から他のユーザーにも読めるので、原文を載せない。
+        self.assertEqual(prompt, PROMPT)
+        self.assertFalse(any("Hello" in arg for arg in argv))
 
     def load_sarashina(self):
         directory = tempfile.TemporaryDirectory()
