@@ -14,6 +14,8 @@ SARASHINA_KEY_FILE = "~/.config/sarashina/api-key"
 SARASHINA_REVIEW_MODEL = "sarashina3-mini"
 # hook の INLINE_CODE_PATTERN・PLACEHOLDER と同じ規則。hook は同じ規則で inline code の欠落を検査する。
 INLINE_CODE_PATTERN = r"(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)"
+# hook の URL_PATTERN と同じ規則。hook は末尾の .,;: を除いた URL が訳文にあるかを検査する。
+URL_PATTERN = r"https?://[^\s<>()\[\]]+"
 PLACEHOLDER = "[[[CODE%d]]]"
 PLACEHOLDER_PATTERN = r"\[\[\[CODE(\d+)\]\]\]"
 SARASHINA_REVIEW_PROMPT = (
@@ -59,25 +61,32 @@ def trim_trailing_spaces(source, text):
     return "\n".join(line.rstrip(" \t") for line in text.split("\n"))
 
 
-def protect_inline_code(text):
+def protect_code_and_urls(text):
     # 原文にある placeholder（hook が伏せたコードブロックなど）より大きい番号を使い、衝突させない。
     start = max(map(int, re.findall(PLACEHOLDER_PATTERN, text)), default=-1) + 1
-    codes = []
+    codes, urls = {}, {}
 
     def replace(match):
-        codes.append(match.group(0))
-        return PLACEHOLDER % (start + len(codes) - 1)
+        number = start + len(codes) + len(urls)
+        if match.group(1):
+            codes[number] = match.group(0)
+            return PLACEHOLDER % number
+        # 文末の句読点は訳させる。hook も URL 末尾の .,;: を除いて検査する。
+        url = match.group(0).rstrip(".,;:")
+        urls[number] = url
+        return PLACEHOLDER % number + match.group(0)[len(url):]
 
-    return re.sub(INLINE_CODE_PATTERN, replace, text), codes, start
+    # inline code を先に照合し、バッククォートの中の URL は inline code として扱う。URL_PATTERN は閉じのバッククォートまで取り込むため。
+    return re.sub(INLINE_CODE_PATTERN + "|" + URL_PATTERN, replace, text), codes, urls
 
 
-def restore_inline_code(text, codes, start):
+def restore_pieces(text, pieces):
     # 総数だけ比べると、1つが消えて別の1つが重複した訳文を通してしまうため、番号ごとに1回あることを確かめる。
-    for number, code in enumerate(codes, start):
+    for number, piece in pieces.items():
         placeholder = PLACEHOLDER % number
         if text.count(placeholder) != 1:
-            raise RuntimeError("the translation API dropped or repeated inline code")
-        text = text.replace(placeholder, code)
+            raise RuntimeError("the translation dropped or repeated inline code or a URL")
+        text = text.replace(placeholder, piece)
     return text
 
 
@@ -115,16 +124,19 @@ def translate(prompt, timeout, settings):
     if key in source.group(1):
         raise RuntimeError("source contains the API key")
     # 翻訳APIは指示を受け取れず、inline code の識別子まで訳すことがあるため、placeholder に置き換えて送る。
-    protected, codes, start = protect_inline_code(source.group(1))
+    protected, codes, urls = protect_code_and_urls(source.group(1))
     # APIが5000文字を超える入力を400で拒否するため、呼ばずに失敗させる。置き換えで長くなることがあるので、送る文字列で数える。
     if len(protected) > SARASHINA_MAX_CHARS:
         raise RuntimeError("source is longer than %d characters" % SARASHINA_MAX_CHARS)
     body = post_sarashina(SARASHINA_URL, key,
                           {"text": protected, "source_lang": "en", "target_lang": "ja"},
                           timeout)
-    text = restore_inline_code(trim_trailing_spaces(source.group(1), body["translated_text"]), codes, start)
+    text = restore_pieces(trim_trailing_spaces(source.group(1), body["translated_text"]), codes)
+    # URL を欠かす段が翻訳APIか sarashina3-mini か特定できていないため、URL は2回の見直しも placeholder のまま通し、最後に戻す。
+    # 照合用の原文も同じ番号の placeholder にそろえる。
+    mini_source = restore_pieces(protected, codes)
     # 翻訳APIの訳文に残る条件・状態の取り違えを、照合で減らすため。
-    text = ask_mini(key, SARASHINA_REVIEW_PROMPT, source.group(1), text, timeout - (time.monotonic() - started))
+    text = ask_mini(key, SARASHINA_REVIEW_PROMPT, mini_source, text, timeout - (time.monotonic() - started))
     # 照合だけでは翻訳APIの体言止めや直訳調が残り、sarashina3-mini単体より得点が下がったため、文体だけを整える。
-    text = ask_mini(key, SARASHINA_POLISH_PROMPT, source.group(1), text, timeout - (time.monotonic() - started))
-    return "<translation>\n" + text + "\n</translation>"
+    text = ask_mini(key, SARASHINA_POLISH_PROMPT, mini_source, text, timeout - (time.monotonic() - started))
+    return "<translation>\n" + restore_pieces(text, urls) + "\n</translation>"
