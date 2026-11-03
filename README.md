@@ -99,7 +99,6 @@ Stop hook で訳文を Claude に返す方式では、訳文や翻訳の指示�
 | モデル | CLI | effort | 翻訳の中央値 | 得点（5段階） | 重大な誤訳 | 必須事実の欠落 | 判定 |
 |---|---|---|---|---|---|---|---|
 | `claude-haiku-5-5` | Claude Code 2.1.301 | low | 3.14秒 | 4.92 | 0件 | 0件 | 合格（既定） |
-| `deepseek-v4.1-flash-1017` | pi 1.3.0（Alibaba Token Plan） | low | 3.67秒 | 4.86 | 0件 | 0件 | 合格 |
 | `gpt-6-luna` | Codex 0.163.0 | low | 4.83秒 | 4.75 | 0件 | 0件 | 合格 |
 | `gpt-6.1-terra` | Codex 0.164.0 | low | 5.07秒 | 4.69 | 0件 | 0件 | 合格 |
 | `claude-sonnet-5-5` | Claude Code 2.1.316 | low | 5.21秒 | 4.72 | 0件 | 0件 | 合格 |
