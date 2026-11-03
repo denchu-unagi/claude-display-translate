@@ -1,3 +1,5 @@
 # このファイルを同じディレクトリに settings.py としてコピーし、MODEL を選んで使う。
-# MODEL は translators/ のファイル名から .py を除いたもの（haiku・luna から選ぶ）。
+# MODEL は translators/ のファイル名から .py を除いたもの（haiku・luna・sarashina から選ぶ）。
 MODEL = "haiku"
+# sarashina のキーを既定の場所以外に置くときだけ、コメントを外してパスを書く。
+# SARASHINA_API_KEY_FILE = "<キーのファイルのパス>"

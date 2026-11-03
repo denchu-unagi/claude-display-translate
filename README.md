@@ -47,6 +47,7 @@ npm ci
 訳文は画面に出るだけで、会話履歴にも Claude に送る内容にも入りません。
 `MessageDisplay` hook は表示を差し替えられるだけで、会話履歴（transcript）に保存される内容や Claude に送る内容は変えられません。
 そのため、英語のメッセージが何件あっても、訳文のぶん会話履歴が増えることはありません。
+
 [Claude Code の公式ドキュメント](https://code.claude.com/docs/ja/hooks)
 
 Stop hook で訳文を Claude に返す方式では、訳文や翻訳の指示が会話に入り、そのぶんコンテキストを消費します。
@@ -84,18 +85,25 @@ Stop hook で訳文を Claude に返す方式では、訳文や翻訳の指示�
 ## 翻訳モデルの比較
 
 翻訳に使うモデルを選ぶために、同じ英文を CLI とモデルを変えて訳したベンチマーク結果です。
-英文は6種類（短文、条件の多い指示、Markdown、コード、日本語混じり、約2000文字の長文）で、各3回、モデルごとに18件を訳しました。
+英文は次の6種類で、各3回、モデルごとに18件を訳しました。
+
+- 短文
+- 条件の多い指示
+- Markdown
+- コード
+- 日本語混じり
+- 約2000文字の長文
+
 時間は CLI の起動を含む1件の翻訳時間の中央値です。
 
 | モデル | CLI | effort | 翻訳の中央値 | 得点（5段階） | 重大な誤訳 | 必須事実の欠落 | 判定 |
 |---|---|---|---|---|---|---|---|
-| `claude-haiku-5-5` | Claude Code 2.1.301 | low | 3.14秒 | 4.78 | 0件 | 0件 | 合格（既定） |
-| `deepseek-v4.1-flash-1017` | pi 1.3.0（Alibaba Token Plan） | low | 3.67秒 | 4.72 | 0件 | 0件 | 合格 |
-| `gpt-6-luna` | Codex 0.163.0 | low | 4.83秒 | 4.69 | 0件 | 0件 | 合格 |
-| `gpt-6.1-terra` | Codex 0.164.0 | low | 5.07秒 | 4.83 | 0件 | 0件 | 合格 |
-| `claude-sonnet-5-5` | Claude Code 2.1.316 | low | 5.21秒 | 4.64 | 0件 | 0件 | 合格 |
-| `deepseek-v4.1-flash` | pi 1.3.0（OpenCode Go） | low | 5.74秒 | 4.50 | 0件 | 0件 | 合格 |
-| `gemini-3.8-flash` | Antigravity 1.4.12 | low | 8.89秒 | 4.58 | 0件 | 0件 | 合格 |
+| `claude-haiku-5-5` | Claude Code 2.1.301 | low | 3.14秒 | 4.92 | 0件 | 0件 | 合格（既定） |
+| `gpt-6-luna` | Codex 0.163.0 | low | 4.83秒 | 4.75 | 0件 | 0件 | 合格 |
+| `gpt-6.1-terra` | Codex 0.164.0 | low | 5.07秒 | 4.69 | 0件 | 0件 | 合格 |
+| `claude-sonnet-5-5` | Claude Code 2.1.316 | low | 5.21秒 | 4.72 | 0件 | 0件 | 合格 |
+| `deepseek-v4.1-flash` | pi 1.3.0（OpenCode Go） | low | 5.74秒 | 4.75 | 0件 | 0件 | 合格 |
+| `gemini-3.8-flash` | Antigravity 1.4.12 | low | 8.89秒 | 4.83 | 0件 | 0件 | 合格 |
 
 - 合格の条件は、18件すべてが45秒以内に終わって機械的な検査（日本語で返ること、Markdown・コード・表の書式が保たれることなど）に合格し、重大な誤訳と必須事実の欠落が0件で、得点の平均が4以上であることです。hook の既定は、追加の設定なしで使える `claude-haiku-5-5` にしています。
 - 得点は、5が「自然で正確」、4が「意味は変わらないが小さな不自然さがある」です。訳したモデル名を伏せて Anthropic の `claude-opus-5-5` に2回採点させた平均で、誤訳の指摘は原文と照合して確かめました。
@@ -110,6 +118,7 @@ Stop hook で訳文を Claude に返す方式では、訳文や翻訳の指示�
 
 Claude Code の公式ドキュメントと同じ流れで、
 設定ファイルに hook を追加します。Claude Code に頼んでも、手動でも、同じ4つの手順で導入できます。
+
 [Claude Code の公式ドキュメント](https://code.claude.com/docs/ja/hooks-guide#set-up-your-first-hook)
 
 1. **hook のファイルを置く**
@@ -184,7 +193,7 @@ Claude Code の公式ドキュメントと同じ流れで、
    mkdir -p ~/.claude/hooks/claude-display-translate/translators
    base=https://raw.githubusercontent.com/denchu-unagi/claude-display-translate/main/hooks/claude-display-translate
    curl -fsSL "$base/settings.py.sample" -o ~/.claude/hooks/claude-display-translate/settings.py
-   for f in _cli.py haiku.py luna.py; do
+   for f in _cli.py haiku.py luna.py sarashina.py; do
      curl -fsSL "$base/translators/$f" -o ~/.claude/hooks/claude-display-translate/translators/$f
    done
    ```
@@ -197,6 +206,7 @@ Claude Code の公式ドキュメントと同じ流れで、
    |---|---|---|---|
    | `haiku` | Claude Code（`claude -p`） | `claude-haiku-5-5`（effort low） | Claude Code |
    | `luna` | Codex CLI（`codex exec`） | `gpt-6-luna`（effort low） | Codex CLI へのログイン |
+   | `sarashina` | Sarashina API | `sarashina3-translate` で訳し、`sarashina3-mini` で照合して文体を整える | [Sarashina API のキー](#sarashina-の-api-キー) |
 
 3. **次のメッセージから、書き換えた設定で翻訳する**
 
@@ -248,8 +258,55 @@ python3 -m unittest discover tests
 
 偽の翻訳コマンドを使うので、実際の Claude Code とネットワークは使いません。
 
+## 番外編: Sarashina で翻訳する
+
+[Sarashina](https://sarashina.ai/) は、ソフトバンク傘下の SB Intuitions が開発する国産の LLM です。2026年11月時点では無償ベータ版として提供されていて、API も無料で使えます。
+
+`MODEL = "sarashina"` にすると、`sarashina3-translate` の訳文を `sarashina3-mini` が2回見直します。
+
+1. 原文と照らし合わせて、意味の誤りだけを直します。`sarashina3-translate` だけでは誤訳が残り、下の比較で不合格だったためです。
+2. 文末の体言止め、直訳調の言い回し、主語と述語がかみ合わない文だけを直します。1だけでは下訳の文体が残り、`sarashina3-mini` 単体より得点が低かったためです。
+
+### Haiku・Luna との比較
+
+[翻訳モデルの比較](#翻訳モデルの比較)と同じ英文と採点で比べた結果です。Sarashina のモデルの時間は、API を直接呼んだ時間です。
+
+| モデル | CLI | effort | 翻訳の中央値 | 得点（5段階） | 重大な誤訳 | 必須事実の欠落 | 判定 |
+|---|---|---|---|---|---|---|---|
+| `sarashina3-mini` | Sarashina API | — | 1.34秒 | 4.44 | 0件 | 0件 | 合格 |
+| `claude-haiku-5-5` | Claude Code 2.1.301 | low | 3.14秒 | 4.92 | 0件 | 0件 | 合格（既定） |
+| `sarashina3-translate` + `sarashina3-mini` | Sarashina API | — | 4.15秒 | 4.58 | 0件 | 0件 | 合格 |
+| `gpt-6-luna` | Codex 0.163.0 | low | 4.83秒 | 4.75 | 0件 | 0件 | 合格 |
+| `sarashina3-translate` | Sarashina API | — | 1.27秒 | 3.67 | 3件 | 0件 | 不合格 |
+| `sarashina3.2-mini-thinking` | Sarashina API | low | 10.62秒 | 4.31 | 1件 | 0件 | 不合格 |
+
+- `sarashina3-translate` + `sarashina3-mini` は `sarashina` で測りました。`sarashina3-mini` の2回の見直しは temperature 0.1 で動かします。API の既定値の 0.7 では、同じ英文でも回によって直し漏れや余計な言い換えが出たためです。
+- `sarashina3-mini` と `sarashina3.2-mini-thinking` は、hook の翻訳指示をそのまま渡し、temperature などを API の既定値のまま測った参考値です。`sarashina3.2-mini-thinking` は effort を low にしました。この2つは `MODEL` では選べません。
+
+### Sarashina を使うときの注意
+
+[Sarashinaサービス利用規約](https://sarashina.ai/terms)のうち、この hook での使い方に関わる点です。
+
+- 第3条により、利用できるのは日本国内に住む個人か、日本国内に本店がある法人だけです。
+- 第10条により、個人を特定できる情報や第三者の著作物などは入力できません。この hook は英語の返答を自動で送るので、返答に人名やメールアドレスなどが含まれていても、閉じたコードブロックの外にあればそのまま送ります。
+- 第9条と第11条により、送った文章と出力は、無償・有償を問わずモデルの学習に使われることがあります。学習への利用を拒否できるのは有償プランだけです。
+- 閉じたコードブロックを除いて5000文字を超える原文は、Sarashina API が受け付けないため、`[翻訳失敗: 原文を表示]` を付けて原文を表示します。
+
+### Sarashina の API キー
+
+1. [API コンソール](https://chat.sarashina.ai/dashboard/api-keys)でキーを発行します。
+2. Claude Code の外の端末で次を実行し、表示されたプロンプトにキーを貼り付けます。入力は画面に表示されず、自分だけが読めるファイル `~/.config/sarashina/api-key` に保存されます。
+
+   ```bash
+   ( umask 077; mkdir -p ~/.config/sarashina; printf 'Sarashina API key: '; read -rs key; echo; printf '%s\n' "$key" > ~/.config/sarashina/api-key )
+   ```
+
+- キーを Claude Code に貼り付けたり、このファイルを Claude Code に読ませたりしないでください。Claude Code が読んだキーは Anthropic に送られます。さらに `haiku` や `luna` に切り替えているときに Claude の返答にキーが含まれると、この hook がその提供元へも送ります。
+- キーを別のファイルに置くときは、`settings.py` に `SARASHINA_API_KEY_FILE = "<ファイルのパス>"` を書きます。
+- 原文にキーの値が含まれるときは、Sarashina に送らずに `[翻訳失敗: 原文を表示]` を付けて原文を表示します。
+
 ## ライセンス
 
 [MIT](LICENSE)
 
-Anthropic とは関係のない非公式ツールです。
+Anthropic・OpenAI・SB Intuitions とは関係のない非公式ツールです。
