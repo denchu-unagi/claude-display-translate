@@ -177,7 +177,7 @@ Claude Code の公式ドキュメントと同じ流れで、
 |---|---|
 | `MSGDISP_STATE_DIR` | 状態とログの置き場所を変える。この hook 専用のディレクトリを指定する |
 | `MSGDISP_CHILD_TIMEOUT` | 翻訳の timeout 秒（既定45秒、上限は hook 全体の予算55秒の残り） |
-| `MSGDISP_CLAUDE_CMD` | Claude コマンドを JSON 配列で差し替える（テスト用。設定ファイルを使わない既定の経路だけ） |
+| `MSGDISP_CLAUDE_CMD` | Claude コマンドを JSON 配列で差し替える（テスト用。Haiku で翻訳するときだけ効く） |
 | `MSGDISP_FORCE_ATTENDED` | 非対話セッションでも動かす |
 | `MSGDISP_CONFIG_DIR` | 翻訳の設定のディレクトリを変える（既定は hook と同じディレクトリの `claude-display-translate`） |
 
@@ -193,7 +193,7 @@ Claude Code の公式ドキュメントと同じ流れで、
    mkdir -p ~/.claude/hooks/claude-display-translate/translators
    base=https://raw.githubusercontent.com/denchu-unagi/claude-display-translate/main/hooks/claude-display-translate
    curl -fsSL "$base/settings.py.sample" -o ~/.claude/hooks/claude-display-translate/settings.py
-   for f in _cli.py haiku.py luna.py sarashina.py; do
+   for f in _cli.py luna.py sarashina.py; do
      curl -fsSL "$base/translators/$f" -o ~/.claude/hooks/claude-display-translate/translators/$f
    done
    ```
@@ -204,7 +204,7 @@ Claude Code の公式ドキュメントと同じ流れで、
 
    | `MODEL` | 翻訳に使うもの | モデル | 必要なもの |
    |---|---|---|---|
-   | `haiku` | Claude Code（`claude -p`） | `claude-haiku-5-5`（effort low） | Claude Code |
+   | `haiku` | hook に組み込みの `claude -p`。`settings.py` を置かないときと同じ | `claude-haiku-5-5`（effort low） | Claude Code |
    | `luna` | Codex CLI（`codex exec`） | `gpt-6-luna`（effort low） | Codex CLI へのログイン |
    | `sarashina` | Sarashina API | `sarashina3-translate` で訳し、`sarashina3-mini` で照合して文体を整える | [Sarashina API のキー](#sarashina-の-api-キー) |
 
@@ -212,8 +212,8 @@ Claude Code の公式ドキュメントと同じ流れで、
 
    設定ファイルは翻訳のたびに読み込むので、Claude Code の再起動は要りません。`settings.py` を削除すると、既定の Haiku での翻訳に戻ります。
 
-- ほかのモデルを使うときは、`translators/` に新しい名前のファイルを置いて `translate(prompt, timeout, settings)` を定義し、`MODEL` にそのファイル名から `.py` を除いた名前（英小文字・数字・`-` だけ。先頭は英小文字か数字）を書きます。`prompt` は hook の翻訳指示と原文（`<source>` と `</source>` の間）を含む文字列、`timeout` は使ってよい秒数、`settings` は `settings.py` の変数です。訳文は `<translation>` と `</translation>` で囲んだ文字列で返します。`timeout` 秒で終わらないときは `TimeoutError` を送出すると、ほかの時間切れと同じく翻訳を5分休みます。`MODEL` にパスは指定できません。`MODEL` が指すファイルの実体（シンボリックリンク経由を含む）が `translators/` の外にあるときは実行しません。モデルのファイルが中で読み込むものは制限しません。同梱のファイルは、取り直すと上書きされます。
-- `MODEL` の名前が不正なときや、`translators/` にそのファイルが無いときは、`[翻訳失敗: 原文を表示]` を付けて原文を表示し、`translate.log` に `translator_error` を記録します。モデルのファイルで起きた例外（CLI の異常終了を含む）も同じく `translator_error` として、例外の型名だけを記録します。
+- ほかのモデルを使うときは、`translators/` に新しい名前のファイルを置いて `translate(prompt, timeout, settings)` を定義し、`MODEL` にそのファイル名から `.py` を除いた名前（英小文字・数字・`-` だけ。先頭は英小文字か数字）を書きます。`prompt` は hook の翻訳指示と原文（`<source>` と `</source>` の間）を含む文字列、`timeout` は使ってよい秒数、`settings` は `settings.py` の変数です。訳文は `<translation>` と `</translation>` で囲んだ文字列で返します。`timeout` 秒で終わらないときは `TimeoutError` を送出すると、ほかの時間切れと同じく翻訳を5分休みます。`MODEL` にパスは指定できません。`MODEL` が指すファイルの実体（シンボリックリンク経由を含む）が `translators/` の外にあるときは実行しません。`haiku` は組み込みの Haiku を使う名前なので、`translators/haiku.py` を置いても読みません。モデルのファイルが中で読み込むものは制限しません。同梱のファイルは、取り直すと上書きされます。
+- `MODEL` の名前が不正なときや、`translators/` にそのファイルが無いときは、`[翻訳失敗: 原文を表示]` を付けて原文を表示し、`translate.log` に `translator_error` を記録します。モデルのファイルで起きた例外（CLI の異常終了を含む）も同じく `translator_error` として、例外の型名だけを記録します。`haiku` の失敗は、`settings.py` を置かないときと同じく、利用枠切れなどの原因ごとに記録します。
 - 翻訳する文は、選んだモデルの提供元へ送られます。
 - [注意](#注意)に書いた翻訳に送る前の検査、timeout 後に翻訳を休む動作、訳文の検査は、どのモデルでも hook が行います。
 - 設定ファイルとモデルのファイルは Python の隔離モード（`python3 -I`）で実行します。`PYTHONPATH` などの `PYTHON` で始まる環境変数、作業ディレクトリにあるモジュール、ユーザーの site-packages（`pip install --user` で入れたもの）は読み込みません。書き換えた内容がすぐに使われるよう、Python のキャッシュ（`.pyc`）は作らず、既にあるキャッシュも読みません。
@@ -224,7 +224,7 @@ Claude Code の公式ドキュメントと同じ流れで、
 
 - 言語を判定するまでの行と、表示を保留している行の本文を、メッセージごとにここへ一時保存します。メッセージの最後で削除します。
 - Claude Code が途中で終了するなどして残った分は、別のメッセージの最後に、最後の更新から1時間たったものを削除します。
-- 既定の Haiku で翻訳する間だけ、原文を OS の一時ディレクトリに所有者だけが読めるファイルとして書き、翻訳が終わると削除します。
+- Haiku で翻訳する間だけ、原文を OS の一時ディレクトリに所有者だけが読めるファイルとして書き、翻訳が終わると削除します。
 - 翻訳の設定ファイルを使うときは、翻訳のたびに hook が一時ディレクトリを用意して `TMPDIR` として渡し、翻訳が終わると中身ごと削除します。
 - `translate.log` には1件の結果を1行の `key=value` で記録します。空白や引用符を含む値は JSON 文字列で囲みます。
 
@@ -245,7 +245,7 @@ Claude Code の公式ドキュメントと同じ流れで、
 ## 仕組み
 
 1. ストリーミング中のメッセージを英語と判定した時点で、以降の行の表示を保留して `[自動翻訳]` を表示します。
-2. メッセージの最後で、保留した全文のうち閉じたコードブロックと区切り用のタグをプレースホルダーに置き換え、system prompt として `claude -p` に渡します。翻訳の設定ファイルがあるときは、`claude -p` の代わりに、設定ファイルで選んだモデルのファイルの `translate()` に渡します。
+2. メッセージの最後で、保留した全文のうち閉じたコードブロックと区切り用のタグをプレースホルダーに置き換え、system prompt として `claude -p` に渡します。設定ファイルで `haiku` 以外のモデルを選んだときは、`claude -p` の代わりに、そのモデルのファイルの `translate()` に渡します。
 3. 訳文で段落・リスト・見出しが大きく欠けていないこと、原文の inline code と URL が訳文に含まれていることを確かめてから表示します。
 
 翻訳用の `claude -p` は hook、tool、MCP、セッション保存を無効にして起動するので、翻訳が再帰しません。設定ファイルは hook とは別のプロセスで実行し、翻訳が終わるか制限時間を過ぎたら、設定ファイルと同じプロセスグループに残ったプロセスをまとめて止めます。設定ファイルが別のセッションで起動したプロセスは止められません。

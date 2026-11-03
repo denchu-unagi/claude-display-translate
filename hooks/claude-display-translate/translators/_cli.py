@@ -1,5 +1,4 @@
 import json
-import os
 import subprocess
 import tempfile
 
@@ -25,25 +24,6 @@ def run_cli(argv, stdin_text, timeout, cwd=None, env=None):
     if process.returncode != 0:
         raise RuntimeError("command failed: exit code %d" % process.returncode)
     return stdout.decode("utf-8", "replace")
-
-
-def claude(prompt, timeout, model, effort):
-    # hook の resolve_claude と同じく、Claude Code が渡す実行パスを優先する。
-    execpath = os.environ.get("CLAUDE_CODE_EXECPATH")
-    command = [execpath] if execpath and os.path.isfile(execpath) else ["claude"]
-    # argvは/procから他userにも読めるため、原文は所有者だけが読める一時ファイルで渡す。
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md") as file:
-        file.write(prompt)
-        file.flush()
-        argv = command + ["-p",
-                "--setting-sources", "",
-                "--settings", '{"disableAllHooks":true,"disableClaudeAiConnectors":true,"autoMemoryEnabled":false}',
-                "--strict-mcp-config", "--no-session-persistence",
-                "--model", model, "--effort", effort,
-                "--tools", "", "--disable-slash-commands",
-                "--output-format", "text",
-                "--system-prompt-file", file.name]
-        return run_cli(argv, "Translate the source.", timeout)
 
 
 def codex(prompt, timeout, model, effort):

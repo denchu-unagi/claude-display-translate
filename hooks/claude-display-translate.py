@@ -101,6 +101,9 @@ try:
         model = model.strip()
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", model):
             result = {"error": "BadModel", "timeout": False}
+        elif model == "haiku":
+            # Haiku の呼び出しを1か所にまとめ、設定ファイルがないときと同じ失敗の記録にするため、translators を読まずに組み込みの経路へ戻す。
+            result = {"builtin": True}
         else:
             translators_dir = os.path.join(CONFIG_DIR, "translators")
             model_path = os.path.join(translators_dir, model + ".py")
@@ -123,6 +126,8 @@ except BaseException as exc:
 out.write(json.dumps(result))
 out.flush()
 """
+# run_translator が「組み込みの経路で翻訳する」ことを run_child に伝える値。
+BUILTIN = object()
 
 
 SECRET_PATTERN = re.compile(
@@ -414,6 +419,8 @@ def run_translator(directory, text, timeout, env, known_secrets):
     if outcome.get("timeout") is True:
         note_failure()
         return fail("timeout", elapsed)
+    if outcome.get("builtin") is True:
+        return BUILTIN
     if "error" in outcome:
         return fail("translator_error", elapsed, exception=str(outcome["error"]))
     translated = outcome.get("translated")
@@ -450,7 +457,12 @@ def run_child(text):
         return fail("budget")
     settings_path = os.path.join(config_dir(), "settings.py")
     if os.path.isfile(settings_path):
-        return run_translator(config_dir(), text, timeout, env, known_secrets)
+        translated = run_translator(config_dir(), text, timeout, env, known_secrets)
+        if translated is not BUILTIN:
+            return translated
+        timeout = min(timeout, HOOK_BUDGET_SECONDS - (time.monotonic() - STARTED) - KILL_GRACE_SECONDS)
+        if not timeout > 0:
+            return fail("budget")
     command = resolve_claude()
     if not command:
         return fail("no_claude")
