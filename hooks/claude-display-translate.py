@@ -79,7 +79,7 @@ CHILD_ARGS = [
 ]
 # 設定ファイルは別プロセスのgroupで実行し、期限が来たら孫プロセスごと止められるようにする。
 # 結果はdupしたfd 1へJSONで1回だけ書き、設定ファイルのprintや孫の出力が結果に混ざらないようにする。
-TRANSLATOR_RUNNER = """import importlib.util, json, os, re, sys, tempfile, types
+TRANSLATOR_RUNNER = """import importlib.util, json, os, re, sys, tempfile, time, types
 sys.pycache_prefix = os.path.join(tempfile.gettempdir(), "pycache")
 # モデルが from _cli import ... で読む共通部も、ソースの隣に残った古い .pyc ではなく今のソースを使うため、キャッシュの置き場を hook 専用の TMPDIR 配下に限る（-B なので書き込みもしない）。
 out = os.fdopen(os.dup(1), "w")
@@ -87,7 +87,6 @@ os.dup2(2, 1)
 request = json.loads(sys.stdin.read())
 CONFIG_DIR = sys.argv[1]
 prompt = request["prompt"]
-timeout = request["timeout"]
 def load_module(name, path):
     # import の仕組みは .pyc をキャッシュし、同じ秒・同じ長さの書き換えでは古い内容が使われるため、ソースを直接読んで実行する。
     module = types.ModuleType(name)
@@ -121,6 +120,11 @@ try:
                 spec = importlib.util.spec_from_file_location("msgdisp_model", model_path)
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
+                # 親は子の起動前に期限を決め、強制終了はその KILL_GRACE_SECONDS 後以降になる。この期限に合わせ、起動と設定・モデルの読み込みにかかった時間を持ち時間から除く。
+                # time.monotonic はプロセスをまたいで同じ時計（Linux の CLOCK_MONOTONIC）を読む。
+                timeout = request["deadline"] - time.monotonic()
+                if timeout <= 0:
+                    raise TimeoutError()
                 translated = module.translate(prompt, timeout, settings)
                 if not isinstance(translated, str):
                     raise TypeError()
@@ -395,7 +399,7 @@ def run_translator(directory, text, timeout, env, known_secrets):
     # 設定ファイルの関数や孫CLIが止まらなくても、Claude Codeのhook timeoutより前に原文へ戻してcooldownを記録する。
     # -I は、Claude Code が hook を project のディレクトリで起動し、そこにある json.py などが標準ライブラリより先に読まれるのを防ぐため。
     # 設定ファイル側が自分で起動したCLIを自分のtimeoutで止める猶予を残すため、待ち時間はtimeoutよりKILL_GRACE_SECONDSだけ長くする。
-    request = json.dumps({"prompt": PROMPT + "\n\n" + text, "timeout": timeout})
+    request = json.dumps({"prompt": PROMPT + "\n\n" + text, "deadline": started + timeout})
     # 設定ファイルが残した一時ファイルを強制停止時にも残さないため、専用のTMPDIRを用意して消す。
     with tempfile.TemporaryDirectory() as temporary:
         process, output, _, timed_out, error = run_process(

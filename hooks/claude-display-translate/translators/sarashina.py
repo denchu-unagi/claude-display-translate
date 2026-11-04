@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -111,6 +112,25 @@ def ask_mini(key, instructions, source, draft, timeout):
     return tagged.group(1)
 
 
+def call_within(budget, call):
+    # urllib の timeout は接続と受信の操作ごとにかかり、合計では timeout を超えうるため、実時間で打ち切る。
+    # 打ち切った呼び出しは止まらないが、daemon スレッドなので翻訳プログラムが結果を書いて終わるときに消える。
+    done = {}
+
+    def run():
+        try:
+            done["value"] = call()
+        except BaseException as exc:
+            done["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(max(budget, 0))
+    if "error" in done and not isinstance(done["error"], TimeoutError):
+        raise done["error"]
+    return done.get("value")
+
+
 def translate(prompt, timeout, settings):
     started = time.monotonic()
     path = getattr(settings, "SARASHINA_API_KEY_FILE", SARASHINA_KEY_FILE)
@@ -140,5 +160,10 @@ def translate(prompt, timeout, settings):
     # 翻訳APIの訳文に残る条件・状態の取り違えを、照合で減らすため。
     text = ask_mini(key, SARASHINA_REVIEW_PROMPT, mini_source, text, timeout - (time.monotonic() - started))
     # 照合だけでは翻訳APIの体言止めや直訳調が残り、sarashina3-mini単体より得点が下がったため、文体だけを整える。
-    text = ask_mini(key, SARASHINA_POLISH_PROMPT, mini_source, text, timeout - (time.monotonic() - started))
+    # 長文では文体の整えが時間内に終わらないことがあり、そのときは原文表示より読める照合済みの訳文を返す。
+    # 照合の時間から間に合うかを予測すると、間に合う整えまで省くため、実際に時間切れになったときだけ省く。
+    budget = timeout - (time.monotonic() - started)
+    polished = call_within(budget, lambda: ask_mini(key, SARASHINA_POLISH_PROMPT, mini_source, text, budget))
+    if polished is not None:
+        text = polished
     return "<translation>\n" + restore_pieces(text, urls) + "\n</translation>"
