@@ -895,13 +895,41 @@ def handle_final(key, index, delta):
         cleanup(key)
 
 
+def launched_inside_claude():
+    # 環境変数は入れ子のclaudeにもそのまま引き継がれるので、プロセスの祖先で見分ける。
+    # 自分のclaude（CLAUDE_PID）の祖先に同じ名前のプロセスがあれば、別のclaudeのBashツールから起動された入れ子とみなす。
+    # 判定できないときは、スクリプトの出力を訳文に変えないよう入れ子として扱う。
+    # shortcut: 導入方法や版の違いでプロセス名が異なるclaudeの入れ子は見分けられない。誤判定の報告があれば判定材料を見直す。
+    import subprocess
+
+    try:
+        listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,comm="], capture_output=True,
+                                 text=True, timeout=5, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return True
+    processes = {}
+    for line in listing.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) == 3:
+            processes[fields[0]] = (fields[1], os.path.basename(fields[2].strip()))
+    pid = os.environ.get("CLAUDE_PID", "")
+    if pid not in processes:
+        return True
+    parent, name = processes[pid]
+    seen = {pid}
+    while parent in processes and parent not in seen:
+        seen.add(parent)
+        parent, ancestor = processes[parent]
+        if ancestor == name:
+            return True
+    return False
+
+
 def attended():
     if os.environ.get("CLAUDE_CODE_SESSION_ATTENDED") == "1" or os.environ.get("MSGDISP_FORCE_ATTENDED"):
         return True
-    # Orcaのチャット画面のようにSDK経由で人が見ている画面は、その画面に付く環境変数の名前を指定して有効にする。
-    # 指定した変数は画面内のBashツールから起動したclaude -pにも引き継がれ、その出力も訳文になるため、既定では有効にしない。
-    name = os.environ.get("MSGDISP_ATTENDED_ENV")
-    return bool(name and os.environ.get(name))
+    # Orcaのチャット画面はSDK経由で起動するためATTENDEDが0になるが、人が画面を見ているので翻訳する。
+    return bool(os.environ.get("ORCA_CHAT_SCRATCH_DIR")) and not launched_inside_claude()
 
 
 def main():

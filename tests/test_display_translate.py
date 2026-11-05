@@ -425,28 +425,46 @@ class LockRaceTest(HookTestCase):
 
 
 class AttendedTest(HookTestCase):
-    # 非対話セッションでは翻訳しない。MSGDISP_ATTENDED_ENVで名指しした変数があるときだけ、SDK経由でも翻訳する。
+    # 非対話セッションでは翻訳しない。ただしOrcaのチャット画面はSDK経由でも人が画面を見ているので翻訳する。
+    # チャット内のBashツールから起動した入れ子のclaude -pは、スクリプトが出力を読むので翻訳しない。
+    ORCA_CHAT = ("1 0 /sbin/launchd\n200 1 /Applications/Orca.app/Contents/MacOS/Orca Helper\n"
+                 "300 200 /Users/u/.local/bin/claude\n")
+    NESTED = ORCA_CHAT + "400 300 /bin/zsh\n500 400 /Users/u/.local/bin/claude\n"
+
     def setUp(self):
         super().setUp()
-        for name in ("MSGDISP_FORCE_ATTENDED", "MSGDISP_ATTENDED_ENV", "ORCA_CHAT_SCRATCH_DIR"):
+        for name in ("MSGDISP_FORCE_ATTENDED", "ORCA_CHAT_SCRATCH_DIR"):
             self.env.pop(name, None)
         self.env["CLAUDE_CODE_SESSION_ATTENDED"] = "0"
 
-    def test_an_unattended_session_is_left_untouched(self):
-        # 指定が無ければOrcaの変数だけでは動かず、指定があっても名指しした変数が無いスクリプトでは動かない。
-        cases = {"orca-without-opt-in": {"ORCA_CHAT_SCRATCH_DIR": str(self.root / "orca-chat")},
-                 "opt-in-outside-orca": {"MSGDISP_ATTENDED_ENV": "ORCA_CHAT_SCRATCH_DIR"}}
+    def use_ps(self, listing, claude_pid, in_orca_chat=True):
+        # listingがNoneなら、psが失敗する環境を表す。
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        ps = bin_dir / "ps"
+        ps.write_text("#!/bin/sh\n" + ("exit 1\n" if listing is None else "cat <<'EOF'\n" + listing + "EOF\n"),
+                      encoding="utf-8")
+        ps.chmod(0o755)
+        self.env["PATH"] = str(bin_dir) + os.pathsep + self.env.get("PATH", "")
+        self.env["CLAUDE_PID"] = claude_pid
+        if in_orca_chat:
+            self.env["ORCA_CHAT_SCRATCH_DIR"] = str(self.root / "orca-chat")
+
+    def test_sessions_nobody_watches_are_left_untouched(self):
+        cases = {"outside-orca": (self.ORCA_CHAT, "300", False),
+                 "nested-claude-p": (self.NESTED, "500", True),
+                 "ps-unavailable": (None, "300", True)}
         base = self.env
-        for message_id, extra in cases.items():
+        for message_id, (listing, claude_pid, in_orca_chat) in cases.items():
             with self.subTest(message_id):
-                self.env = {**base, **extra}
+                self.env = dict(base)
+                self.use_ps(listing, claude_pid, in_orca_chat)
                 marker = self.use_translator(name=message_id)
                 self.assertIsNone(self.final_once(message_id))
                 self.assertFalse(marker.exists())
 
-    def test_an_opted_in_orca_chat_session_is_translated(self):
-        self.env["MSGDISP_ATTENDED_ENV"] = "ORCA_CHAT_SCRATCH_DIR"
-        self.env["ORCA_CHAT_SCRATCH_DIR"] = str(self.root / "orca-chat")
+    def test_an_orca_chat_session_is_translated(self):
+        self.use_ps(self.ORCA_CHAT, "300")
         marker = self.use_translator()
         self.assertEqual(self.final_once("orca-chat"), MARK + SOURCE + " やく")
         self.assertTrue(marker.exists())
