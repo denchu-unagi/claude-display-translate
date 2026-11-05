@@ -895,14 +895,20 @@ def handle_final(key, index, delta):
         cleanup(key)
 
 
+def attended():
+    if os.environ.get("CLAUDE_CODE_SESSION_ATTENDED") == "1" or os.environ.get("MSGDISP_FORCE_ATTENDED"):
+        return True
+    # Orcaのチャット画面はSDK経由で起動するためATTENDEDが0になるが、人が画面を見ているので翻訳する。
+    # チャット内のBashツールから起動したclaude -pもこの変数を引き継ぐため、翻訳の対象になる。
+    return bool(os.environ.get("ORCA_CHAT_SCRATCH_DIR"))
+
+
 def main():
     global current_message
     raw = sys.stdin.buffer.read()
     if os.environ.get("MSGDISP_TRANSLATE_CHILD"):
         return
-    if os.environ.get("CLAUDE_CODE_SESSION_ATTENDED") != "1" and not os.environ.get(
-        "MSGDISP_FORCE_ATTENDED"
-    ):
+    if not attended():
         return
     try:
         data = json.loads(raw.decode("utf-8"))

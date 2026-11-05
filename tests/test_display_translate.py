@@ -424,6 +424,26 @@ class LockRaceTest(HookTestCase):
         return displayed(stdout)
 
 
+class AttendedTest(HookTestCase):
+    # 非対話セッションでは翻訳しない。ただしOrcaのチャット画面はSDK経由でも人が画面を見ているので翻訳する。
+    def setUp(self):
+        super().setUp()
+        for name in ("MSGDISP_FORCE_ATTENDED", "ORCA_CHAT_SCRATCH_DIR"):
+            self.env.pop(name, None)
+        self.env["CLAUDE_CODE_SESSION_ATTENDED"] = "0"
+
+    def test_an_unattended_session_is_left_untouched(self):
+        marker = self.use_translator()
+        self.assertIsNone(self.final_once("unattended"))
+        self.assertFalse(marker.exists())
+
+    def test_an_orca_chat_session_is_translated(self):
+        self.env["ORCA_CHAT_SCRATCH_DIR"] = str(self.root / "orca-chat")
+        marker = self.use_translator()
+        self.assertEqual(self.final_once("orca-chat"), MARK + SOURCE + " やく")
+        self.assertTrue(marker.exists())
+
+
 class StateDirectoryTest(HookTestCase):
     # 状態ファイルには表示を保留した本文が入るので、他ユーザーから読めない権限を保証する。
     def test_an_existing_state_directory_is_made_owner_only(self):
