@@ -424,6 +424,64 @@ class LockRaceTest(HookTestCase):
         return displayed(stdout)
 
 
+class AttendedTest(HookTestCase):
+    # 非対話セッションでは翻訳しない。ただしOrcaのチャット画面はSDK経由でも人が画面を見ているので翻訳する。
+    # チャット内のBashツールから起動した入れ子のclaude -pは、スクリプトが出力を読むので翻訳しない。
+    ORCA_CHAT = ("1 0 /sbin/launchd\n200 1 /Applications/Orca.app/Contents/MacOS/Orca Helper\n"
+                 "300 200 /Users/u/.local/bin/claude\n")
+    NESTED = ORCA_CHAT + "400 300 /bin/zsh\n500 400 /Users/u/.local/bin/claude\n"
+    # 外側のclaudeとプロセス名が異なる入れ子。外側はClaude Codeの実行中セッションの記録で見分ける。
+    NESTED_RENAMED = ORCA_CHAT + "400 300 /bin/zsh\n500 400 /opt/node/bin/node\n"
+    BROKEN_CHAIN = "1 0 /sbin/launchd\n300 200 /Users/u/.local/bin/claude\n"
+
+    def setUp(self):
+        super().setUp()
+        for name in ("MSGDISP_FORCE_ATTENDED", "ORCA_STRUCTURED_SESSION"):
+            self.env.pop(name, None)
+        self.env["CLAUDE_CODE_SESSION_ATTENDED"] = "0"
+        # 開発者の手元で実行中のClaude Codeのセッションの記録を拾わないようにする。
+        self.env["CLAUDE_CONFIG_DIR"] = str(self.root / "claude-config")
+
+    def use_ps(self, listing, claude_pid, in_orca_chat=True, recorded=()):
+        # listingがNoneなら、psが失敗する環境を表す。recordedは、Claude Codeが実行中のセッションとして記録したPID。
+        sessions = Path(self.env["CLAUDE_CONFIG_DIR"]) / "sessions"
+        sessions.mkdir(parents=True, exist_ok=True)
+        for pid in recorded:
+            (sessions / (pid + ".json")).write_text("{}", encoding="utf-8")
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        ps = bin_dir / "ps"
+        ps.write_text("#!/bin/sh\n" + ("exit 1\n" if listing is None else "cat <<'EOF'\n" + listing + "EOF\n"),
+                      encoding="utf-8")
+        ps.chmod(0o755)
+        self.env["PATH"] = str(bin_dir) + os.pathsep + self.env.get("PATH", "")
+        self.env["CLAUDE_PID"] = claude_pid
+        if in_orca_chat:
+            self.env["ORCA_STRUCTURED_SESSION"] = "1"
+
+    def test_sessions_nobody_watches_are_left_untouched(self):
+        # 同じ名前の入れ子は記録なしでも見分け、名前が異なる入れ子は記録で見分ける。
+        cases = {"outside-orca": (self.ORCA_CHAT, "300", False, ()),
+                 "nested-claude-p": (self.NESTED, "500", True, ()),
+                 "nested-claude-p-with-another-name": (self.NESTED_RENAMED, "500", True, ("300",)),
+                 "ancestor-missing": (self.BROKEN_CHAIN, "300", True, ()),
+                 "ps-unavailable": (None, "300", True, ())}
+        base = self.env
+        for message_id, (listing, claude_pid, in_orca_chat, recorded) in cases.items():
+            with self.subTest(message_id):
+                self.env = dict(base, CLAUDE_CONFIG_DIR=str(self.root / message_id))
+                self.use_ps(listing, claude_pid, in_orca_chat, recorded)
+                marker = self.use_translator(name=message_id)
+                self.assertIsNone(self.final_once(message_id))
+                self.assertFalse(marker.exists())
+
+    def test_an_orca_chat_session_is_translated(self):
+        self.use_ps(self.ORCA_CHAT, "300")
+        marker = self.use_translator()
+        self.assertEqual(self.final_once("orca-chat"), MARK + SOURCE + " やく")
+        self.assertTrue(marker.exists())
+
+
 class StateDirectoryTest(HookTestCase):
     # 状態ファイルには表示を保留した本文が入るので、他ユーザーから読めない権限を保証する。
     def test_an_existing_state_directory_is_made_owner_only(self):

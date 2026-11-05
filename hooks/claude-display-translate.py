@@ -895,14 +895,56 @@ def handle_final(key, index, delta):
         cleanup(key)
 
 
+def launched_inside_claude():
+    # 環境変数は入れ子のclaudeにもそのまま引き継がれるので、プロセスの祖先で見分ける。
+    # 自分のclaude（CLAUDE_PID）の祖先にclaudeがあれば、別のclaudeのBashツールから起動された入れ子とみなす。
+    # 祖先がclaudeかは、同じプロセス名か、Claude Codeが実行中のセッションを記録するsessions/<PID>.jsonがあるかで見る。
+    # sessions/は非公開の形式なので、無くなっても名前の比較だけで判定を続ける。
+    # 判定できないときは、スクリプトの出力を訳文に変えないよう入れ子として扱う。
+    # shortcut: 名前が異なり、外側のclaudeの記録も見つからない入れ子（別のCLAUDE_CONFIG_DIRで起動したときなど）は見分けられない。誤判定の報告があれば判定材料を見直す。
+    import subprocess
+
+    try:
+        listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,comm="], capture_output=True,
+                                 text=True, timeout=5, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return True
+    processes = {}
+    for line in listing.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) == 3:
+            processes[fields[0]] = (fields[1], os.path.basename(fields[2].strip()))
+    pid = os.environ.get("CLAUDE_PID", "")
+    if pid not in processes:
+        return True
+    sessions = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"), "sessions")
+    parent, name = processes[pid]
+    seen = {pid}
+    # PID 0を親に持つプロセスまでたどれたときだけ、祖先にclaudeがいないと判定する。
+    while parent != "0":
+        if parent not in processes or parent in seen:
+            return True
+        seen.add(parent)
+        if processes[parent][1] == name or os.path.exists(os.path.join(sessions, parent + ".json")):
+            return True
+        parent = processes[parent][0]
+    return False
+
+
+def attended():
+    if os.environ.get("CLAUDE_CODE_SESSION_ATTENDED") == "1" or os.environ.get("MSGDISP_FORCE_ATTENDED"):
+        return True
+    # Orcaのチャット画面はSDK経由で起動するためATTENDEDが0になるが、人が画面を見ているので翻訳する。
+    # ORCA_STRUCTURED_SESSIONは、Orcaがチャット画面などのstructured sessionの子プロセスに必ず付ける。
+    return bool(os.environ.get("ORCA_STRUCTURED_SESSION")) and not launched_inside_claude()
+
+
 def main():
     global current_message
     raw = sys.stdin.buffer.read()
     if os.environ.get("MSGDISP_TRANSLATE_CHILD"):
         return
-    if os.environ.get("CLAUDE_CODE_SESSION_ATTENDED") != "1" and not os.environ.get(
-        "MSGDISP_FORCE_ATTENDED"
-    ):
+    if not attended():
         return
     try:
         data = json.loads(raw.decode("utf-8"))
