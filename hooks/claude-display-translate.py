@@ -901,7 +901,7 @@ def launched_inside_claude():
     # 祖先がclaudeかは、同じプロセス名か、Claude Codeが実行中のセッションを記録するsessions/<PID>.jsonがあるかで見る。
     # sessions/は非公開の形式なので、無くなっても名前の比較だけで判定を続ける。
     # 判定できないときは、スクリプトの出力を訳文に変えないよう入れ子として扱う。
-    # shortcut: 名前が異なり、別のCLAUDE_CONFIG_DIRで起動したclaudeの入れ子は見分けられない。誤判定の報告があれば判定材料を見直す。
+    # shortcut: 名前が異なり、外側のclaudeの記録も見つからない入れ子（別のCLAUDE_CONFIG_DIRで起動したときなど）は見分けられない。誤判定の報告があれば判定材料を見直す。
     import subprocess
 
     try:
