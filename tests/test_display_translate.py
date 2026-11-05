@@ -441,11 +441,13 @@ class AttendedTest(HookTestCase):
         self.env["CLAUDE_CODE_SESSION_ATTENDED"] = "0"
         # 開発者の手元で実行中のClaude Codeのセッションの記録を拾わないようにする。
         self.env["CLAUDE_CONFIG_DIR"] = str(self.root / "claude-config")
-        (self.root / "claude-config" / "sessions").mkdir(parents=True)
-        (self.root / "claude-config" / "sessions" / "300.json").write_text("{}", encoding="utf-8")
 
-    def use_ps(self, listing, claude_pid, in_orca_chat=True):
-        # listingがNoneなら、psが失敗する環境を表す。
+    def use_ps(self, listing, claude_pid, in_orca_chat=True, recorded=()):
+        # listingがNoneなら、psが失敗する環境を表す。recordedは、Claude Codeが実行中のセッションとして記録したPID。
+        sessions = Path(self.env["CLAUDE_CONFIG_DIR"]) / "sessions"
+        sessions.mkdir(parents=True, exist_ok=True)
+        for pid in recorded:
+            (sessions / (pid + ".json")).write_text("{}", encoding="utf-8")
         bin_dir = self.root / "bin"
         bin_dir.mkdir(exist_ok=True)
         ps = bin_dir / "ps"
@@ -458,16 +460,17 @@ class AttendedTest(HookTestCase):
             self.env["ORCA_STRUCTURED_SESSION"] = "1"
 
     def test_sessions_nobody_watches_are_left_untouched(self):
-        cases = {"outside-orca": (self.ORCA_CHAT, "300", False),
-                 "nested-claude-p": (self.NESTED, "500", True),
-                 "nested-claude-p-with-another-name": (self.NESTED_RENAMED, "500", True),
-                 "ancestor-missing": (self.BROKEN_CHAIN, "300", True),
-                 "ps-unavailable": (None, "300", True)}
+        # 同じ名前の入れ子は記録なしでも見分け、名前が異なる入れ子は記録で見分ける。
+        cases = {"outside-orca": (self.ORCA_CHAT, "300", False, ()),
+                 "nested-claude-p": (self.NESTED, "500", True, ()),
+                 "nested-claude-p-with-another-name": (self.NESTED_RENAMED, "500", True, ("300",)),
+                 "ancestor-missing": (self.BROKEN_CHAIN, "300", True, ()),
+                 "ps-unavailable": (None, "300", True, ())}
         base = self.env
-        for message_id, (listing, claude_pid, in_orca_chat) in cases.items():
+        for message_id, (listing, claude_pid, in_orca_chat, recorded) in cases.items():
             with self.subTest(message_id):
-                self.env = dict(base)
-                self.use_ps(listing, claude_pid, in_orca_chat)
+                self.env = dict(base, CLAUDE_CONFIG_DIR=str(self.root / message_id))
+                self.use_ps(listing, claude_pid, in_orca_chat, recorded)
                 marker = self.use_translator(name=message_id)
                 self.assertIsNone(self.final_once(message_id))
                 self.assertFalse(marker.exists())
