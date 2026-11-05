@@ -425,19 +425,27 @@ class LockRaceTest(HookTestCase):
 
 
 class AttendedTest(HookTestCase):
-    # 非対話セッションでは翻訳しない。ただしOrcaのチャット画面はSDK経由でも人が画面を見ているので翻訳する。
+    # 非対話セッションでは翻訳しない。MSGDISP_ATTENDED_ENVで名指しした変数があるときだけ、SDK経由でも翻訳する。
     def setUp(self):
         super().setUp()
-        for name in ("MSGDISP_FORCE_ATTENDED", "ORCA_CHAT_SCRATCH_DIR"):
+        for name in ("MSGDISP_FORCE_ATTENDED", "MSGDISP_ATTENDED_ENV", "ORCA_CHAT_SCRATCH_DIR"):
             self.env.pop(name, None)
         self.env["CLAUDE_CODE_SESSION_ATTENDED"] = "0"
 
     def test_an_unattended_session_is_left_untouched(self):
-        marker = self.use_translator()
-        self.assertIsNone(self.final_once("unattended"))
-        self.assertFalse(marker.exists())
+        # 指定が無ければOrcaの変数だけでは動かず、指定があっても名指しした変数が無いスクリプトでは動かない。
+        cases = {"orca-without-opt-in": {"ORCA_CHAT_SCRATCH_DIR": str(self.root / "orca-chat")},
+                 "opt-in-outside-orca": {"MSGDISP_ATTENDED_ENV": "ORCA_CHAT_SCRATCH_DIR"}}
+        base = self.env
+        for message_id, extra in cases.items():
+            with self.subTest(message_id):
+                self.env = {**base, **extra}
+                marker = self.use_translator(name=message_id)
+                self.assertIsNone(self.final_once(message_id))
+                self.assertFalse(marker.exists())
 
-    def test_an_orca_chat_session_is_translated(self):
+    def test_an_opted_in_orca_chat_session_is_translated(self):
+        self.env["MSGDISP_ATTENDED_ENV"] = "ORCA_CHAT_SCRATCH_DIR"
         self.env["ORCA_CHAT_SCRATCH_DIR"] = str(self.root / "orca-chat")
         marker = self.use_translator()
         self.assertEqual(self.final_once("orca-chat"), MARK + SOURCE + " やく")

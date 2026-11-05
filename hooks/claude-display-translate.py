@@ -898,9 +898,10 @@ def handle_final(key, index, delta):
 def attended():
     if os.environ.get("CLAUDE_CODE_SESSION_ATTENDED") == "1" or os.environ.get("MSGDISP_FORCE_ATTENDED"):
         return True
-    # Orcaのチャット画面はSDK経由で起動するためATTENDEDが0になるが、人が画面を見ているので翻訳する。
-    # チャット内のBashツールから起動したclaude -pもこの変数を引き継ぐため、翻訳の対象になる。
-    return bool(os.environ.get("ORCA_CHAT_SCRATCH_DIR"))
+    # Orcaのチャット画面のようにSDK経由で人が見ている画面は、その画面に付く環境変数の名前を指定して有効にする。
+    # 指定した変数は画面内のBashツールから起動したclaude -pにも引き継がれ、その出力も訳文になるため、既定では有効にしない。
+    name = os.environ.get("MSGDISP_ATTENDED_ENV")
+    return bool(name and os.environ.get(name))
 
 
 def main():
