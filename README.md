@@ -179,7 +179,7 @@ Claude Code の公式ドキュメントと同じ流れで、
 | `MSGDISP_CHILD_TIMEOUT` | 翻訳の timeout 秒（既定45秒、上限は hook 全体の予算55秒の残り） |
 | `MSGDISP_CLAUDE_CMD` | Claude コマンドを JSON 配列で差し替える（テスト用。Haiku で翻訳するときだけ効く） |
 | `MSGDISP_FORCE_ATTENDED` | 非対話セッションでも動かす |
-| `MSGDISP_ATTENDED_ENV` | 指定した名前の環境変数があれば、非対話セッションでも動かす（例: Orca のチャット画面なら `ORCA_CHAT_SCRATCH_DIR`） |
+| `MSGDISP_ATTENDED_ENV` | 指定した名前の環境変数に空でない値があれば、非対話セッションでも動かす（例: Orca のチャット画面なら `ORCA_CHAT_SCRATCH_DIR`） |
 | `MSGDISP_CONFIG_DIR` | 翻訳の設定のディレクトリを変える（既定は hook と同じディレクトリの `claude-display-translate`） |
 
 ## 翻訳モデルを変える
