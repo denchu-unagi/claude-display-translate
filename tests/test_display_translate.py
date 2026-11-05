@@ -430,12 +430,19 @@ class AttendedTest(HookTestCase):
     ORCA_CHAT = ("1 0 /sbin/launchd\n200 1 /Applications/Orca.app/Contents/MacOS/Orca Helper\n"
                  "300 200 /Users/u/.local/bin/claude\n")
     NESTED = ORCA_CHAT + "400 300 /bin/zsh\n500 400 /Users/u/.local/bin/claude\n"
+    # 外側のclaudeとプロセス名が異なる入れ子。外側はClaude Codeの実行中セッションの記録で見分ける。
+    NESTED_RENAMED = ORCA_CHAT + "400 300 /bin/zsh\n500 400 /opt/node/bin/node\n"
+    BROKEN_CHAIN = "1 0 /sbin/launchd\n300 200 /Users/u/.local/bin/claude\n"
 
     def setUp(self):
         super().setUp()
-        for name in ("MSGDISP_FORCE_ATTENDED", "ORCA_CHAT_SCRATCH_DIR"):
+        for name in ("MSGDISP_FORCE_ATTENDED", "ORCA_STRUCTURED_SESSION"):
             self.env.pop(name, None)
         self.env["CLAUDE_CODE_SESSION_ATTENDED"] = "0"
+        # 開発者の手元で実行中のClaude Codeのセッションの記録を拾わないようにする。
+        self.env["CLAUDE_CONFIG_DIR"] = str(self.root / "claude-config")
+        (self.root / "claude-config" / "sessions").mkdir(parents=True)
+        (self.root / "claude-config" / "sessions" / "300.json").write_text("{}", encoding="utf-8")
 
     def use_ps(self, listing, claude_pid, in_orca_chat=True):
         # listingがNoneなら、psが失敗する環境を表す。
@@ -448,11 +455,13 @@ class AttendedTest(HookTestCase):
         self.env["PATH"] = str(bin_dir) + os.pathsep + self.env.get("PATH", "")
         self.env["CLAUDE_PID"] = claude_pid
         if in_orca_chat:
-            self.env["ORCA_CHAT_SCRATCH_DIR"] = str(self.root / "orca-chat")
+            self.env["ORCA_STRUCTURED_SESSION"] = "1"
 
     def test_sessions_nobody_watches_are_left_untouched(self):
         cases = {"outside-orca": (self.ORCA_CHAT, "300", False),
                  "nested-claude-p": (self.NESTED, "500", True),
+                 "nested-claude-p-with-another-name": (self.NESTED_RENAMED, "500", True),
+                 "ancestor-missing": (self.BROKEN_CHAIN, "300", True),
                  "ps-unavailable": (None, "300", True)}
         base = self.env
         for message_id, (listing, claude_pid, in_orca_chat) in cases.items():
