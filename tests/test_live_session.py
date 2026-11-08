@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,6 @@ from test_display_translate import HOOK, MARK
 
 REPO = Path(__file__).resolve().parent.parent
 TRANSLATORS = REPO / "hooks" / "claude-display-translate" / "translators"
-MODEL = os.environ.get("MSGDISP_LIVE_MODEL", "haiku")
 TIMEOUT_SECONDS = 180
 # Claude にそのまま返させる英文。1つ目は、翻訳 API が括弧の中の inline code を括弧ごと落とした回帰の例で、MSGDISP_LIVE_MODEL=sarashina のときに意味を持つ。
 ENGLISH = [
@@ -23,6 +23,42 @@ ENGLISH = [
     "Run `make test` before you push, and read https://example.com/guide for the details.",
 ]
 INSTRUCTION = "Reply with exactly the following line and nothing else, no code fence: "
+
+
+def installed_config_dir():
+    # 導入手順では hook の隣のディレクトリに置くので、hook と同じ既定の場所を読む。
+    override = os.environ.get("MSGDISP_CONFIG_DIR")
+    if override:
+        return Path(override)
+    return Path.home() / ".claude" / "hooks" / "claude-display-translate"
+
+
+def installed_settings():
+    # テストのために利用者の設定のコードを動かさないため、文字列の代入だけを ast で読む。
+    try:
+        source = (installed_config_dir() / "settings.py").read_bytes()
+        tree = ast.parse(source)
+    except (OSError, SyntaxError, ValueError):
+        return {}
+    found = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id in ("MODEL", "SARASHINA_API_KEY_FILE")
+                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+            found[node.targets[0].id] = node.value.value
+    return found
+
+
+def live_models(settings):
+    # スキップされる通常のテストで利用者のファイルを読まないよう、モデルの決定は MSGDISP_LIVE=1 の実行時だけ行う。
+    requested = os.environ.get("MSGDISP_LIVE_MODEL", "")
+    if requested == "all":
+        names = sorted(path.stem for path in TRANSLATORS.glob("*.py") if not path.name.startswith("_"))
+        return ["haiku"] + names
+    if requested:
+        return [requested]
+    return [settings.get("MODEL", "haiku")]
 
 
 def inline_codes(text):
@@ -56,11 +92,13 @@ def descendants(root):
                      "実際の Claude Code とネットワークを使うため、MSGDISP_LIVE=1 のときだけ実行する")
 class LiveSessionTest(unittest.TestCase):
     def test_display_content_used(self):
-        for text in ENGLISH:
-            with self.subTest(text=text):
-                self.check_english(text)
+        settings = installed_settings()
+        for model in live_models(settings):
+            for text in ENGLISH:
+                with self.subTest(model=model, text=text):
+                    self.check_english(model, settings, text)
 
-    def check_english(self, text):
+    def check_english(self, model, installed, text):
         root = Path(tempfile.mkdtemp(prefix="claude-msgdisp-live-"))
         kept = []
         self.addCleanup(lambda: kept or shutil.rmtree(root, ignore_errors=True))
@@ -68,7 +106,11 @@ class LiveSessionTest(unittest.TestCase):
         (config / "translators").mkdir(parents=True)
         for source in sorted(TRANSLATORS.glob("*.py")):
             shutil.copyfile(source, config / "translators" / source.name)
-        (config / "settings.py").write_text(f'MODEL = "{MODEL}"\n', encoding="utf-8")
+        # 一時の設定は値の引用符で壊れないよう repr で書き、既定外にキーを置いた利用者も確かめられるよう API キーのパスを引き継ぐ。
+        lines = [f"MODEL = {model!r}\n"]
+        if "SARASHINA_API_KEY_FILE" in installed:
+            lines.append(f"SARASHINA_API_KEY_FILE = {installed['SARASHINA_API_KEY_FILE']!r}\n")
+        (config / "settings.py").write_text("".join(lines), encoding="utf-8")
         state = root / "state"
         state.mkdir()
         work = root / "cwd"
