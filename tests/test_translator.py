@@ -571,11 +571,11 @@ class BundledTest(unittest.TestCase):
                     self.assertRaises(RuntimeError):
                 sarashina.translate(prompt, 12, settings)
 
-    def test_sarashina_fails_when_inline_code_does_not_come_back_once(self):
+    def test_sarashina_fails_when_inline_code_comes_back_repeatedly(self):
         sarashina, settings = self.load_sarashina()
         prompt = "Instructions.\n\n<source>\nRun `a` and `b`.\n</source>"
-        # 欠落、総数が同じままの欠落と重複、欠落のない重複のどれも戻さない。
-        for draft in ("[[[CODE0]]] を実行します。", "[[[CODE0]]] と [[[CODE0]]] を実行します。",
+        # 総数が同じままの欠落と重複、欠落のない重複のどちらも戻さない。
+        for draft in ("[[[CODE0]]] と [[[CODE0]]] を実行します。",
                       "[[[CODE0]]] と [[[CODE1]]] と [[[CODE1]]] を実行します。"):
             reply = io.BytesIO(json.dumps({"translated_text": draft}).encode("utf-8"))
             with self.subTest(draft=draft), \
@@ -585,6 +585,40 @@ class BundledTest(unittest.TestCase):
         # 原文は5000文字以内でも、置き換えで5000文字を超えるなら送らない。
         prompt = "Instructions.\n\n<source>\n" + "`a` " * 1000 + "\n</source>"
         with mock.patch.object(sarashina.urllib.request, "urlopen", side_effect=AssertionError("sent")), \
+                self.assertRaises(RuntimeError):
+            sarashina.translate(prompt, 12, settings)
+
+    def test_sarashina_reviews_inline_code_the_translation_api_dropped(self):
+        # 翻訳 API は括弧の中が placeholder だけの部分を括弧ごと落とすことがある。落ちた inline code は照合で原文から補う。
+        sarashina, settings = self.load_sarashina()
+        prompt = "Instructions.\n\n<source>\nRun `a` and `b`.\n</source>"
+        requests = []
+        replies = [{"translated_text": "[[[CODE0]]] を実行します。"},
+                   {"choices": [{"message": {"content": "<translation>\n`a` と `b` を実行します。\n</translation>"}}]},
+                   {"choices": [{"message": {"content": "<translation>\n`a` と `b` を実行してください。\n</translation>"}}]}]
+
+        def urlopen(request, timeout):
+            requests.append(json.loads(request.data))
+            return io.BytesIO(json.dumps(replies[len(requests) - 1]).encode("utf-8"))
+
+        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
+            self.assertEqual(sarashina.translate(prompt, 12, settings),
+                             "<translation>\n`a` と `b` を実行してください。\n</translation>")
+        # 落ちた inline code は下訳に戻さず、照合用の原文から補わせる。
+        review = requests[1]["messages"][1]["content"]
+        self.assertIn("<draft>\n`a` を実行します。\n</draft>", review)
+        self.assertNotIn("[[[CODE1]]]", review)
+        self.assertIn("<source>\nRun `a` and `b`.\n</source>", review)
+
+    def test_sarashina_fails_when_a_review_does_not_restore_inline_code_as_often_as_the_source(self):
+        # 原文に同じ inline code が2回あると、片方が落ちて照合でも補われない訳文を、存在だけの検査では通してしまう。
+        sarashina, settings = self.load_sarashina()
+        prompt = "Instructions.\n\n<source>\nRun `a` and `a`.\n</source>"
+        replies = [{"translated_text": "[[[CODE0]]] を実行します。"},
+                   {"choices": [{"message": {"content": "<translation>\n`a` を実行します。\n</translation>"}}]},
+                   {"choices": [{"message": {"content": "<translation>\n`a` を実行してください。\n</translation>"}}]}]
+        responses = iter(io.BytesIO(json.dumps(reply).encode("utf-8")) for reply in replies)
+        with mock.patch.object(sarashina.urllib.request, "urlopen", lambda request, timeout: next(responses)), \
                 self.assertRaises(RuntimeError):
             sarashina.translate(prompt, 12, settings)
 
