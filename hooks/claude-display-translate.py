@@ -220,6 +220,14 @@ def remaining_english(text):
     return english
 
 
+def switches_to_english(before, text):
+    # 閉じていないフェンスの中も、コードの可能性が高いので判定から外す（protect_code は保護しない）。
+    lead = split_fences(before)[1]
+    source = lead + "\n" + text if lead else text
+    lines = [line for line in split_fences(source)[0] if not hide_japanese_line(line)]
+    return remaining_english("\n".join(lines)) >= MIN_TRANSLATE_LETTERS
+
+
 def classify(counts):
     kana, japanese, english, words = counts
     if kana >= 1 and japanese >= MIN_JA_CHARS and japanese >= words:
@@ -668,6 +676,8 @@ def parse_lang(text):
         return ("ja", 0)
     if text.startswith("en ") and text[3:].isascii() and text[3:].isdigit():
         return ("en", int(text[3:]))
+    if text.startswith("mix ") and text[4:].isascii() and text[4:].isdigit():
+        return ("mix", int(text[4:]))
     return None
 
 
@@ -779,8 +789,10 @@ def handle_non_final(key, index, delta):
         log_event("late", index=index)
         return
     lang = read_lang(key)
-    if lang is None and index > 0:
-        wait_for_batches(key, index, NONFINAL_WAIT_SECONDS, NONFINAL_POLL_SECONDS, True)
+    # "ja" でも前の batch の記録を待ち、前の batch が英語へ切り替えたかを知る。
+    # shortcut: 前の batch が待ち時間内に記録されないとこの batch を原文で表示し、後で前の batch が切り替えると訳文がこの batch より後に出る。表示順の乱れが報告されたら待ち方を見直す。
+    if index > 0 and (lang is None or lang[0] == "ja"):
+        wait_for_batches(key, index, NONFINAL_WAIT_SECONDS, NONFINAL_POLL_SECONDS, switching=True)
         lang = read_lang(key)
     if lang is None:
         verdict = judge(joined(collect(key, "seen"), index) + delta)
@@ -792,10 +804,26 @@ def handle_non_final(key, index, delta):
         if lang is None:
             write_batch_unless_closed(key, index, "seen", delta)
             return
-    if lang[0] == "ja":
+    if lang[0] != "ja":
+        if write_batch_unless_closed(key, index, "held", delta):
+            emit(MARK if index == lang[1] else "")
         return
-    if write_batch_unless_closed(key, index, "held", delta):
-        emit(MARK if index == lang[1] else "")
+    # 切り替えの判定・lang の置き換え・batch の記録を1回の lock にまとめ、後続の batch との競合を防ぐ。
+    # write_batch_unless_closed は lock を取り直して自分と競合するため、この中からは呼ばない。
+    with locked(key):
+        if os.path.exists(state_path(key, "closed")):
+            log_event("late", index=index)
+            return
+        lang = read_lang(key) or lang
+        if (lang[0] == "ja" and not in_cooldown()
+                and switches_to_english(joined(collect(key, "seen"), index), delta)):
+            write_state(state_path(key, "lang"), "mix %d" % index)
+            lang = ("mix", index)
+        if lang[0] == "ja":
+            write_state(batch_path(key, index, "seen"), delta)
+            return
+        write_state(batch_path(key, index, "held"), delta)
+    emit(MARK if index == lang[1] else "")
 
 
 def write_batch_unless_closed(key, index, kind, delta):
@@ -809,12 +837,15 @@ def write_batch_unless_closed(key, index, kind, delta):
     return True
 
 
-def wait_for_batches(key, index, limit=FINAL_WAIT_SECONDS, poll=FINAL_POLL_SECONDS, any_lang=False):
+def wait_for_batches(key, index, limit=FINAL_WAIT_SECONDS, poll=FINAL_POLL_SECONDS, switching=False):
+    # 非final は切り替えが決まった時点（"en"/"mix"）でだけ待ちを打ち切る。final は "ja" のままの
+    # メッセージでも後から切り替えた batch を見落とさないよう、全 batch の記録を待つ。
     deadline = time.monotonic() + limit
     while True:
-        lang = read_lang(key)
-        if lang is not None and (any_lang or lang[0] == "ja"):
-            return
+        if switching:
+            lang = read_lang(key)
+            if lang is not None and lang[0] != "ja":
+                return
         present = set(collect(key, "seen")) | set(collect(key, "held"))
         if all(i in present for i in range(index)):
             return
@@ -831,29 +862,36 @@ def final_output(key, index, delta, state):
     except OSError:
         pass
     lang = read_lang(key)
-    if lang is not None and lang[0] == "ja":
-        return None
-    if lang is not None:
-        state["en"] = True
     seen = collect(key, "seen")
-    if lang is not None:
-        # seenは言語未確定の非finalが原文で表示済みの行なので、訳文に含めると二重に出る。
+    force_hide = False
+    if lang is not None and lang[0] != "ja":
+        state["en"] = True
+        # seenは言語未確定か日本語の非finalが原文で表示済みの行なので、訳文に含めると二重に出る。
         state["full"] = joined(collect(key, "held")) + delta
         before = joined(seen, lang[1])
-    else:
-        if in_cooldown() or judge(joined(seen) + delta) != "en":
-            return None
+        force_hide = lang[0] == "mix"
+    elif lang is None and not in_cooldown() and judge(joined(seen) + delta) == "en":
         state["prefix"] = MARK
         state["full"] = delta
         before = joined(seen)
+    elif not in_cooldown() and switches_to_english(joined(seen), delta):
+        # 表示済みの日本語は取り消せないので、英語の行がまとまって来たこの位置に印を付け、以後の
+        # 日本語の行は伏せて翻訳に送らない。
+        state["prefix"] = MARK
+        state["full"] = delta
+        before = joined(seen)
+        force_hide = True
+    else:
+        return None
     full = state["full"]
     lead = split_fences(before)[1]
     lead = lead + "\n" if lead else ""
     source = lead + full
     counts = count_chars(source)
     hide_japanese = False
-    if classify(counts) == "ja" and counts[0] * KANA_WEIGHT >= counts[2]:
-        if state["prefix"]:
+    mostly_ja = classify(counts) == "ja" and counts[0] * KANA_WEIGHT >= counts[2]
+    if mostly_ja or force_hide:
+        if state["prefix"] and not force_hide:
             log_event("skipped_mostly_ja", ja_chars=counts[1], en_words=counts[3])
             return full
         # 言語確定済みなら非finalが [自動翻訳] を表示済みで取り消せない。日本語の行は言い換えを避けるため

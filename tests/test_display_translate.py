@@ -365,6 +365,54 @@ class TranslationFlowTest(HookTestCase):
         self.assertEqual(screen.count("Done."), 1)
         self.assertIn("やく", screen)
 
+    def test_keeps_japanese_lines_original_after_switching_to_english(self):
+        # 日本語と判定した後に来た英語の行は、その位置から英語の経路に切り替えて訳す。
+        # 切り替え後に英語が大半でも、日本語の行は翻訳に送らず原文のまま表示する。
+        received = self.root / "received.txt"
+        self.use_line_translator(received)
+        first = "まずは変更内容を確認します。\n"
+        paragraph = ("The build failed because the peer dependency was missing.\n"
+                     "Run the test suite again after the lockfile update.\n")
+        last = "確認はここまでです。\n"
+        outputs = self.run_flushes([first, paragraph, last, ""])
+        expected = paragraph.replace("\n", " やく\n") + last
+        self.assertEqual(outputs, [None, MARK, "", expected])
+        self.assertIsNone(re.search("[\u3040-\u30ff\u4e00-\u9fff]", received.read_text(encoding="utf-8")))
+
+    def test_does_not_switch_languages_for_english_inside_a_code_block(self):
+        # フェンスの中の英語では切り替えない。閉じていないフェンスの中も判定から外す。
+        marker = self.use_translator()
+        outputs = self.run_flushes([
+            "まずは変更内容を確認します。\n```text\n",
+            "The build failed because the peer dependency was missing.\n",
+            "```\n確認はここまでです。\n",
+            "",
+        ])
+        self.assertEqual(outputs, [None, None, None, None])
+        self.assertFalse(marker.exists())
+
+    def test_switches_to_english_on_a_single_final_flush(self):
+        # Agent SDK 経由では、メッセージ全体が index 0 の final として一度に届く。
+        received = self.root / "received.txt"
+        self.use_line_translator(received)
+        japanese = "実装が完了しました。\n"
+        english = "Implementation complete. What would you like to do?\n"
+        output = self.flush(0, True, japanese + english)
+        self.assertEqual(output, MARK + japanese + english.rstrip("\n") + " やく\n")
+        self.assertIsNone(re.search("[\u3040-\u30ff\u4e00-\u9fff]", received.read_text(encoding="utf-8")))
+
+    def test_does_not_switch_languages_during_a_translation_cooldown(self):
+        marker = self.use_translator()
+        self.state.mkdir(exist_ok=True)
+        (self.state / "last-failure").touch()
+        outputs = self.run_flushes([
+            "コミットをプッシュして、レビューもおわりました。\n",
+            "Implementation complete. What would you like to do?\n",
+            "",
+        ])
+        self.assertEqual(outputs, [None, None, None])
+        self.assertFalse(marker.exists())
+
 
 def stop(process):
     if process.poll() is None:
