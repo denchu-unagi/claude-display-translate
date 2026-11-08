@@ -259,6 +259,20 @@ python3 -m unittest discover tests
 
 偽の翻訳コマンドを使うので、実際の Claude Code とネットワークは使いません。
 
+実際の Claude Code が hook を呼ぶかどうかは、opt-in のライブテストで確かめられます。実際のモデルを呼ぶので、Claude Code のログインと料金（Sarashina では API キー）が要ります。
+
+```bash
+MSGDISP_LIVE=1 python3 -m unittest discover tests -p test_live_session.py
+```
+
+Sarashina で確かめるときは翻訳先も指定します。
+
+```bash
+MSGDISP_LIVE=1 MSGDISP_LIVE_MODEL=sarashina python3 -m unittest discover tests -p test_live_session.py
+```
+
+ライブテストが確かめるのは、実際の Claude Code が hook を呼ぶこと、hook の訳文が最終出力に使われること（`stream-json` の MessageDisplay hook の応答と `result` が一致すること）、選んだ翻訳先が実際の入力で失敗しないこと（state の `translate.log` に `result=translated` が残ること）です。対話セッションでのバッチ分割、attended の判定（`MSGDISP_FORCE_ATTENDED` で迂回します）、画面の表示は確かめません。`MSGDISP_LIVE` がないときの `python3 -m unittest discover tests` ではスキップされます。
+
 ## 番外編: Sarashina で翻訳する
 
 [Sarashina](https://sarashina.ai/) は、ソフトバンク傘下の SB Intuitions が開発する国産の LLM です。2026年11月時点では無償ベータ版として提供されていて、API も無料で使えます。
