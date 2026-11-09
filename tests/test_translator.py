@@ -610,17 +610,66 @@ class BundledTest(unittest.TestCase):
         self.assertNotIn("[[[CODE1]]]", review)
         self.assertIn("<source>\nRun `a` and `b`.\n</source>", review)
 
+    def test_sarashina_translates_the_source_directly_when_a_review_does_not_restore_inline_code(self):
+        # 翻訳 API が落とした inline code を見直しでも補えないときは、hook の翻訳指示で sarashina3-mini に原文から直接訳させる。
+        sarashina, settings = self.load_sarashina()
+        prompt = "Instructions.\n\n<source>\nRun `a` and `a`.\n</source>"
+        requests = []
+        replies = [{"translated_text": "[[[CODE0]]] を実行します。"},
+                   {"choices": [{"message": {"content": "<translation>\n`a` を実行します。\n</translation>"}}]},
+                   {"choices": [{"message": {"content": "<translation>\n`a` を実行してください。\n</translation>"}}]},
+                   {"choices": [{"message": {"content": "<translation>\n`a` と `a` を実行してください。\n</translation>"}}]}]
+
+        def urlopen(request, timeout):
+            requests.append(json.loads(request.data))
+            return io.BytesIO(json.dumps(replies[len(requests) - 1]).encode("utf-8"))
+
+        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
+            self.assertEqual(sarashina.translate(prompt, 12, settings),
+                             "<translation>\n`a` と `a` を実行してください。\n</translation>")
+        direct = requests[3]
+        self.assertEqual(direct["model"], "sarashina3-mini")
+        self.assertEqual(direct["messages"], [{"role": "system", "content": prompt},
+                                              {"role": "user", "content": "Translate the source."}])
+        self.assertNotIn("temperature", direct)
+
     def test_sarashina_fails_when_a_review_does_not_restore_inline_code_as_often_as_the_source(self):
-        # 原文に同じ inline code が2回あると、片方が落ちて照合でも補われない訳文を、存在だけの検査では通してしまう。
+        # 直接の翻訳でも inline code が原文より少ないときは、hook が原文を表示できるよう失敗させる。
         sarashina, settings = self.load_sarashina()
         prompt = "Instructions.\n\n<source>\nRun `a` and `a`.\n</source>"
         replies = [{"translated_text": "[[[CODE0]]] を実行します。"},
                    {"choices": [{"message": {"content": "<translation>\n`a` を実行します。\n</translation>"}}]},
-                   {"choices": [{"message": {"content": "<translation>\n`a` を実行してください。\n</translation>"}}]}]
+                   {"choices": [{"message": {"content": "<translation>\n`a` を実行してください。\n</translation>"}}]},
+                   {"choices": [{"message": {"content": "`a` を実行してください。"}}]}]
         responses = iter(io.BytesIO(json.dumps(reply).encode("utf-8")) for reply in replies)
         with mock.patch.object(sarashina.urllib.request, "urlopen", lambda request, timeout: next(responses)), \
                 self.assertRaises(RuntimeError):
             sarashina.translate(prompt, 12, settings)
+        # 直接の翻訳の前に時間を使い切ったときは送らずに失敗させ、hook の5分休止を起こす TimeoutError にはしない。
+        sent = []
+
+        def urlopen(request, timeout):
+            sent.append(timeout)
+            return io.BytesIO(json.dumps(replies[len(sent) - 1]).encode("utf-8"))
+
+        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen), \
+                mock.patch.object(sarashina.time, "monotonic", side_effect=[100.0, 103.0, 105.0, 112.0]), \
+                self.assertRaises(RuntimeError):
+            sarashina.translate(prompt, 12, settings)
+        self.assertEqual(len(sent), 3)
+        # 直接の翻訳の応答待ちで時間切れになったときも、TimeoutError ではなく RuntimeError で失敗させる。
+        sent.clear()
+
+        def urlopen_timing_out(request, timeout):
+            sent.append(timeout)
+            if len(sent) == 4:
+                raise TimeoutError()
+            return io.BytesIO(json.dumps(replies[len(sent) - 1]).encode("utf-8"))
+
+        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen_timing_out), \
+                self.assertRaises(RuntimeError):
+            sarashina.translate(prompt, 12, settings)
+        self.assertEqual(len(sent), 4)
 
     def test_sarashina_passes_the_remaining_time_and_stops_when_it_runs_out(self):
         sarashina, settings = self.load_sarashina()

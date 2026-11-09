@@ -174,5 +174,22 @@ def translate(prompt, timeout, settings):
         text = polished
     # 存在だけを調べると、原文に同じ inline code が2回あって片方が落ち、照合でも補われない訳文を通してしまうため、出現回数まで比べる。
     if any(text.count(piece) < mini_source.count(piece) for piece in dropped):
-        raise RuntimeError("the translation dropped inline code")
+        # 照合や整えでは欠落を補えないことがあるが、hook の翻訳指示と原文を渡して直接訳させると残るため、その経路に切り替える。
+        budget = timeout - (time.monotonic() - started)
+        # 残り時間が無いときに送ると urllib が負の timeout で失敗するため、送らずに答が無いものとして扱う。
+        reply = None
+        if budget > 0:
+            reply = call_within(budget, lambda: post_sarashina(SARASHINA_CHAT_URL, key, {
+                "model": SARASHINA_REVIEW_MODEL,
+                "messages": [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": "Translate the source."},
+                ],
+            }, budget))
+        # 元の失敗は時間切れではないので、hook の5分休止を起こす TimeoutError にはしない。
+        content = reply["choices"][0]["message"]["content"] if reply is not None else ""
+        if any(content.count(piece) < mini_source.count(piece) for piece in codes.values()):
+            raise RuntimeError("the translation dropped inline code")
+        # <translation> タグと URL の検査は hook が行い、URL はこの経路で placeholder 化していないので戻さない。
+        return content
     return "<translation>\n" + restore_pieces(text, urls) + "\n</translation>"
