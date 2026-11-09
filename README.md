@@ -286,7 +286,7 @@ MSGDISP_LIVE=1 MSGDISP_LIVE_MODEL=all python3 -m unittest discover tests -p test
 
 2の見直しが時間内に終わらないときは、1で直した訳文を表示します。長文では3段の合計が時間切れになることがあり、原文を表示するより読めるためです。1だけの訳文の品質は、下の比較では測っていません。
 
-`sarashina3-translate` には指示を渡せず、inline code の中の識別子まで日本語に訳すことがあります。そのため inline code はプレースホルダーに置き換えて `sarashina3-translate` へ送り、訳文で元に戻します。`sarashina3-translate` は括弧の中がプレースホルダーだけの部分を括弧ごと落とすことがあります。落ちた inline code は `sarashina3-mini` の見直しで原文から補わせ、補われなかったとき（原文より出現回数が少ないとき）は原文を表示します。
+`sarashina3-translate` には指示を渡せず、inline code の中の識別子まで日本語に訳すことがあります。そのため inline code はプレースホルダーに置き換えて `sarashina3-translate` へ送り、訳文で元に戻します。`sarashina3-translate` は括弧の中がプレースホルダーだけの部分を括弧ごと落とすことがあります。落ちた inline code は `sarashina3-mini` の見直しで原文から補わせます。見直しでも補われないことがあるため、補われなかったとき（原文より出現回数が少ないとき）は、`sarashina3-mini` に hook の翻訳指示をそのまま渡して原文から直接訳させ（下の比較の `sarashina3-mini` と同じ渡し方です）、それでも欠けたときは原文を表示します。
 
 URL もプレースホルダーに置き換えて送ります。URL は `sarashina3-mini` の2回の見直しにもプレースホルダーのまま渡し、最後に元へ戻します。訳文から URL が欠けたとき、欠かしたのが `sarashina3-translate` か `sarashina3-mini` かを特定できていないためです。
 
