@@ -38,6 +38,7 @@ MAX_LENGTH_RATIO = 2
 LENGTH_SLACK_CHARS = 100
 LIST_ITEM_PATTERN = r"[ \t]*(?:[-*+]|\d+[.)])[ \t]"
 HEADING_PATTERN = r"#{1,6}[ \t]"
+TABLE_ROW_PATTERN = r"[ \t]*(?:>[ \t]*)*\|"
 # 日本語の行を伏せる際も行頭の字下げ・引用・リスト・見出しの記号は外に残し、訳文の構造を保つ。
 LINE_PREFIX_PATTERN = r"[ \t]*(?:>[ \t]*)*(?:(?:[-*+]|\d+[.)])[ \t]+)?(?:#{1,6}[ \t]+)?"
 # CommonMarkと同じく、同じ長さのバッククォート列同士だけを組にする。長さの違う列（行中の ``` と
@@ -221,10 +222,20 @@ def remaining_english(text):
 
 
 def switches_to_english(before, text):
+    # 印は表示済みの最後の行の直後に出るので、表が空行で終わる前は切り替えない（空行の無い次の行も表の行になり、印も表の行になるため）。
+    # shortcut: 表が続く間の flush にある英語は訳さない。報告されたら、印の前に空行を入れて切り替える。
+    outside_lines, lead = split_fences(before)
+    last_block = re.split(r"\n[ \t]*\n", "\n".join(outside_lines))[-1]
+    if re.search(r"(?m)^" + TABLE_ROW_PATTERN, last_block):
+        return False
     # 閉じていないフェンスの中も、コードの可能性が高いので判定から外す（protect_code は保護しない）。
-    lead = split_fences(before)[1]
     source = lead + "\n" + text if lead else text
-    lines = [line for line in split_fences(source)[0] if not hide_japanese_line(line)]
+    # 表の行は担当名やモデル名などの訳さない語が多く、表の途中で切り替えると印の行が表の行として表示されるため。
+    lines = [
+        line
+        for line in split_fences(source)[0]
+        if not hide_japanese_line(line) and not re.match(TABLE_ROW_PATTERN, line)
+    ]
     return remaining_english("\n".join(lines)) >= MIN_TRANSLATE_LETTERS
 
 

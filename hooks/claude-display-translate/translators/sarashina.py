@@ -83,11 +83,15 @@ def protect_code_and_urls(text):
     return re.sub(INLINE_CODE_PATTERN + "|" + URL_PATTERN, replace, text), codes, urls
 
 
-def restore_pieces(text, pieces):
+def restore_pieces(text, pieces, missing_ok=False):
     # 総数だけ比べると、1つが消えて別の1つが重複した訳文を通してしまうため、番号ごとに1回あることを確かめる。
     for number, piece in pieces.items():
         placeholder = PLACEHOLDER % number
-        if text.count(placeholder) != 1:
+        count = text.count(placeholder)
+        # 翻訳APIは括弧の中が placeholder だけの部分を括弧ごと落とすことがある。落ちた inline code は照合で原文から補わせる。
+        if count == 0 and missing_ok:
+            continue
+        if count != 1:
             raise RuntimeError("the translation dropped or repeated inline code or a URL")
         text = text.replace(placeholder, piece)
     return text
@@ -153,7 +157,9 @@ def translate(prompt, timeout, settings):
     body = post_sarashina(SARASHINA_URL, key,
                           {"text": protected, "source_lang": "en", "target_lang": "ja"},
                           timeout)
-    text = restore_pieces(trim_trailing_spaces(source.group(1), body["translated_text"]), codes)
+    draft = trim_trailing_spaces(source.group(1), body["translated_text"])
+    dropped = [piece for number, piece in codes.items() if PLACEHOLDER % number not in draft]
+    text = restore_pieces(draft, codes, missing_ok=True)
     # URL を欠かす段が翻訳APIか sarashina3-mini か特定できていないため、URL は2回の見直しも placeholder のまま通し、最後に戻す。
     # 照合用の原文も同じ番号の placeholder にそろえる。
     mini_source = restore_pieces(protected, codes)
@@ -166,4 +172,7 @@ def translate(prompt, timeout, settings):
     polished = call_within(budget, lambda: ask_mini(key, SARASHINA_POLISH_PROMPT, mini_source, text, budget))
     if polished is not None:
         text = polished
+    # 存在だけを調べると、原文に同じ inline code が2回あって片方が落ち、照合でも補われない訳文を通してしまうため、出現回数まで比べる。
+    if any(text.count(piece) < mini_source.count(piece) for piece in dropped):
+        raise RuntimeError("the translation dropped inline code")
     return "<translation>\n" + restore_pieces(text, urls) + "\n</translation>"

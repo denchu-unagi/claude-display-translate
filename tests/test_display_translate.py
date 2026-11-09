@@ -391,6 +391,32 @@ class TranslationFlowTest(HookTestCase):
         self.assertEqual(outputs, [None, None, None, None])
         self.assertFalse(marker.exists())
 
+    def test_does_not_switch_languages_for_table_rows(self):
+        # 担当名・モデル名だけの表の行で切り替えると、訳す語が無いうえ、印の行が表の行として表示される。
+        # 表の前で flush が切れ、表直後の抑止を通らずに表の行だけで判定される状況を固定する。
+        marker = self.use_translator()
+        outputs = self.run_flushes([
+            "工程ごとの担当は次の表のとおりです。\n\n",
+            "| 工程 | 担当 | モデル |\n|---|---|---|\n"
+            "| 調査 | worker | example-model-2 / high |\n| 実装 | executor | example-model-3 / medium |\n",
+            "",
+        ])
+        self.assertEqual(outputs, [None, None, None])
+        self.assertFalse(marker.exists())
+
+    def test_does_not_switch_languages_while_a_table_continues(self):
+        # 表が続く間に英語で切り替えると、印は表示済みの表に続いて表の行になる。空行の無い次の行も表の続きになる。
+        # 英語が最後の flush で来る経路も確かめる。
+        marker = self.use_translator()
+        table = "工程ごとの担当は次の表のとおりです。\n\n| 工程 | 担当 |\n|---|---|\n| 設計 | 本体 |\n"
+        english = "\nThe build failed because the peer dependency was missing.\n"
+        for name, deltas in (("non-final", [table, english, ""]), ("final", [table, english]),
+                             ("continued", [table, "補足です。\n", english, ""])):
+            with self.subTest(name):
+                outputs = self.run_flushes(deltas, message_id="after-table-" + name)
+                self.assertEqual(outputs, [None] * len(deltas))
+                self.assertFalse(marker.exists())
+
     def test_switches_to_english_on_a_single_final_flush(self):
         # Agent SDK 経由では、メッセージ全体が index 0 の final として一度に届く。
         received = self.root / "received.txt"
