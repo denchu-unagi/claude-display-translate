@@ -4,7 +4,14 @@
 
 ## 翻訳モデルのファイルを作る
 
-ほかのモデルを使うときは、`translators/` に新しい名前のファイルを置いて `translate(prompt, timeout, settings)` を定義し、`MODEL` にそのファイル名から `.py` を除いた名前（英小文字・数字・`-` だけ。先頭は英小文字か数字）を書きます。`prompt` は hook の翻訳指示と原文（`<source>` と `</source>` の間）を含む文字列、`timeout` は使ってよい残りの秒数（hook がこのファイルを起動して読み込むまでにかかった時間は差し引き済み）、`settings` は `settings.py` の変数です。訳文は `<translation>` と `</translation>` で囲んだ文字列で返します。`timeout` 秒で終わらないときは `TimeoutError` を送出すると、ほかの時間切れと同じく翻訳を5分休みます。`MODEL` にパスは指定できません。`MODEL` が指すファイルの実体（シンボリックリンク経由を含む）が `translators/` の外にあるときは実行しません。`haiku` は組み込みの Haiku を使う名前なので、`translators/haiku.py` を置いても読みません。モデルのファイルが中で読み込むものは制限しません。同梱のファイルは、取り直すと上書きされます。
+ほかのモデルを使うときは、`translators/` に新しい名前のファイルを置いて `translate(prompt, timeout, settings)` を定義し、`MODEL` にそのファイル名から `.py` を除いた名前（英小文字・数字・`-` だけ。先頭は英小文字か数字）を書きます。引数と戻り値は次のとおりです。
+
+- `prompt` は hook の翻訳指示と原文（`<source>` と `</source>` の間）を含む文字列です。
+- `timeout` は使ってよい残りの秒数です。hook がこのファイルを起動して読み込むまでにかかった時間は差し引き済みです。
+- `settings` は `settings.py` の変数です。
+- 訳文は `<translation>` と `</translation>` で囲んだ文字列で返します。
+
+`timeout` 秒で終わらないときは `TimeoutError` を送出すると、ほかの時間切れと同じく翻訳を5分休みます。`MODEL` にパスは指定できません。`MODEL` が指すファイルの実体（シンボリックリンク経由を含む）が `translators/` の外にあるときは実行しません。`haiku` は組み込みの Haiku を使う名前なので、`translators/haiku.py` を置いても読みません。モデルのファイルが中で読み込むものは制限しません。同梱のファイルは、取り直すと上書きされます。
 
 ## ログの形式
 
