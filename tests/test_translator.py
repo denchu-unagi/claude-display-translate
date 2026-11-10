@@ -630,7 +630,7 @@ class BundledTest(unittest.TestCase):
         direct = requests[3]
         self.assertEqual(direct["model"], "sarashina3-mini")
         self.assertEqual(direct["messages"], [{"role": "system", "content": prompt},
-                                              {"role": "user", "content": "Translate the source."}])
+                                              {"role": "user", "content": "Translate the source into Japanese."}])
         self.assertNotIn("temperature", direct)
 
     def test_sarashina_fails_when_a_review_does_not_restore_inline_code_as_often_as_the_source(self):

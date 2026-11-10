@@ -183,7 +183,8 @@ def translate(prompt, timeout, settings):
                 "model": SARASHINA_REVIEW_MODEL,
                 "messages": [
                     {"role": "system", "content": prompt},
-                    {"role": "user", "content": "Translate the source."},
+                    # "Translate the source." では、1行の短い英文を訳さずにそのまま返すことがあったため、訳す先の言語を書く。
+                    {"role": "user", "content": "Translate the source into Japanese."},
                 ],
             }, budget))
         # 元の失敗は時間切れではないので、hook の5分休止を起こす TimeoutError にはしない。
