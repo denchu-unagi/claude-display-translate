@@ -30,6 +30,14 @@ MOSTLY_JAPANESE = (
     "    - Parse the config and validate it before saving.\n"
 )
 WAIT_SECONDS = 10
+# 英語の1行目に続く、ほぼ日本語の本文と表。表のセルは日本語か、ファイル名や状態などの短い英語だけ。
+TABLE = "| ファイル | 状態 |\n|---|---|\n| `src/app.py` | updated |\n| README.md | unchanged |\n"
+MOSTLY_JAPANESE_WITH_TABLE = [
+    "Reviewing the pull request for the thinking note and README ",
+    "の変更点を確認し、問題なければマージします。\n",
+    "コミットをプッシュして、レビューもおわりました。あとはマージをまつだけです。\n\n" + TABLE,
+]
+ENGLISH_AFTER_TABLE = "\n    - Parse the config and validate it before saving.\n"
 
 
 def payload(message_id, index, final, delta, session_id="session1"):
@@ -354,15 +362,11 @@ class TranslationFlowTest(HookTestCase):
         self.assertFalse(marker.exists())
         self.assertIn("skipped_mostly_ja", self.log())
 
-    def test_marks_a_mostly_japanese_message_whose_only_english_is_in_table_rows(self):
-        # 日本語の行を伏せた後に残る英語が表の中の担当名やモデル名だけなら、訳す語が無いので翻訳を呼ばずに印を付ける。
-        # 表の行を訳す英語に数えると翻訳に送り、訳文に仮名が増えないので翻訳失敗として原文を表示していた。
+    def test_marks_a_mostly_japanese_message_whose_only_english_is_in_a_table(self):
+        # 日本語の行と表の行を伏せた後に訳す英語が残らないなら、翻訳を呼ばずに印を付ける。
+        # 表の行を伏せないと、セルの短い語だけを翻訳に送り、訳文に仮名が増えないので翻訳失敗として原文を表示していた。
         marker = self.use_translator()
-        deltas = ["Reviewing the pull request for the thinking note and README ",
-                  "の変更点を確認し、問題なければマージします。\n",
-                  "コミットをプッシュして、レビューもおわりました。あとはマージをまつだけです。\n\n"
-                  "| 工程 | 担当 | モデル |\n|---|---|---|\n"
-                  "| 調査 | worker | example-model-2 / high |\n| 実装 | executor | example-model-3 / medium |\n", ""]
+        deltas = [*MOSTLY_JAPANESE_WITH_TABLE, ""]
         outputs = self.run_flushes(deltas)
         self.assertEqual(outputs, [MARK, "", "", MOSTLY_JA_MARK + "".join(deltas)])
         self.assertFalse(marker.exists())
@@ -370,18 +374,14 @@ class TranslationFlowTest(HookTestCase):
 
     def test_keeps_table_rows_original_in_a_mostly_japanese_message(self):
         # 日本語が大半のメッセージでは、表の外の英語の行だけを訳し、表の行は日本語の行と同じく翻訳に送らずに原文のまま表示する。
-        # 表のセルの担当名やモデル名を送ると、翻訳 API が名前まで訳す（fable を「寓話」にするなど）。
+        # セルの短い語を送ると、翻訳 API が文脈なしに訳して誤訳する（fable を「寓話」にするなど）。
         received = self.root / "received.txt"
         self.use_line_translator(received)
-        table = "| 工程 | 担当 | モデル |\n|---|---|---|\n| 調査 | worker | example-model-2 / high |\n"
-        deltas = ["Reviewing the pull request for the thinking note and README ",
-                  "の変更点を確認し、問題なければマージします。\n",
-                  "コミットをプッシュして、レビューもおわりました。あとはマージをまつだけです。\n\n" + table
-                  + "\n    - Parse the config and validate it before saving.\n", ""]
+        deltas = [*MOSTLY_JAPANESE_WITH_TABLE[:-1], MOSTLY_JAPANESE_WITH_TABLE[-1] + ENGLISH_AFTER_TABLE, ""]
         outputs = self.run_flushes(deltas)
         self.assertEqual(outputs, [MARK, "", "", "".join(deltas).replace("before saving.", "before saving. やく")])
         sent = received.read_text(encoding="utf-8")
-        self.assertNotIn("worker", sent)
+        self.assertNotIn("unchanged", sent)
         self.assertNotIn("|", sent)
 
     def test_keeps_a_table_whole_when_the_translation_adds_blank_lines(self):
@@ -399,14 +399,10 @@ class TranslationFlowTest(HookTestCase):
             "print('<translation>\\n' + '\\n'.join(lines) + '\\n</translation>')",
             "",
         ]))
-        table = "| 工程 | 担当 | モデル |\n|---|---|---|\n| 調査 | worker | example-model-2 / high |\n"
-        deltas = ["Reviewing the pull request for the thinking note and README ",
-                  "の変更点を確認し、問題なければマージします。\n",
-                  "コミットをプッシュして、レビューもおわりました。あとはマージをまつだけです。\n\n" + table
-                  + "\n    - Parse the config and validate it before saving.\n", ""]
+        deltas = [*MOSTLY_JAPANESE_WITH_TABLE[:-1], MOSTLY_JAPANESE_WITH_TABLE[-1] + ENGLISH_AFTER_TABLE, ""]
         outputs = self.run_flushes(deltas)
         self.assertEqual(outputs[0], MARK)
-        self.assertIn(table, outputs[3])
+        self.assertIn(TABLE, outputs[3])
         self.assertIn("before saving. やく", outputs[3])
 
     def test_does_not_repeat_a_line_shown_before_the_language_was_decided(self):
