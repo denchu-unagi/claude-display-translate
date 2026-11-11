@@ -218,7 +218,7 @@ Claude Code の公式ドキュメントと同じ流れで設定ファイルに h
    |---|---|---|---|
    | `haiku` | hook に組み込みの `claude -p`。`settings.py` を置かないときと同じ | `claude-haiku-5-5`（effort low） | Claude Code |
    | `luna` | Codex CLI（`codex exec`） | `gpt-6-luna`（effort low） | Codex CLI へのログイン |
-   | `sarashina` | Sarashina API | `sarashina3-translate` で訳し、`sarashina3-mini` で照合して文体を整える | [Sarashina API のキー](docs/sarashina.md#sarashina-の-api-キー) |
+   | `sarashina` | Sarashina API | `sarashina3-translate`（翻訳 API だけ） | [Sarashina API のキー](docs/sarashina.md#sarashina-の-api-キー) |
 
    `sarashina` を選ぶ前に、[Sarashina を使うときの注意](docs/sarashina.md#sarashina-を使うときの注意)を読んでください。利用できる人や、送った文章の扱いに条件があります。
 
