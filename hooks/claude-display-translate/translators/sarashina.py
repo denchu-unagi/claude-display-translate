@@ -1,7 +1,7 @@
+import concurrent.futures
 import json
 import os
 import re
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -9,10 +9,10 @@ import urllib.request
 from _cli import AuthFailed, RateLimited
 
 SARASHINA_URL = "https://api.sarashina.ai/v1/translate"
-SARASHINA_CHAT_URL = "https://api.sarashina.ai/v1/chat/completions"
 SARASHINA_MAX_CHARS = 5000
 SARASHINA_KEY_FILE = "~/.config/sarashina/api-key"
-SARASHINA_REVIEW_MODEL = "sarashina3-mini"
+# 翻訳APIは5000文字を超える入力を拒否するため、それに近い長さの原文は空行で2部分に分けて並列に訳す。
+MIN_SPLIT_CHARS = 4800
 # hook の INLINE_CODE_PATTERN・PLACEHOLDER と同じ規則。hook は同じ規則で inline code の欠落を検査する。
 INLINE_CODE_PATTERN = r"(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)"
 # hook の URL_PATTERN・URL_TRAILING_PUNCTUATION と同じ規則。hook は末尾の句読点を除いた URL が訳文にあるかを検査する。
@@ -20,19 +20,11 @@ URL_PATTERN = r"https?://[^\s<>()\[\]]+"
 URL_TRAILING_PUNCTUATION = ".,;:"
 PLACEHOLDER = "[[[CODE%d]]]"
 PLACEHOLDER_PATTERN = r"\[\[\[CODE(\d+)\]\]\]"
-SARASHINA_REVIEW_PROMPT = (
-    "あなたは英日翻訳の校閲者です。<source> の英文と <draft> の日本語訳を比べ、"
-    "意味が変わっている箇所（否定・条件・数値・主語・状態や完了の有無・合否などの取り違え、抜け、付け足し）だけを直してください。"
-    "それ以外の言い回しは変えないでください。"
-    "Markdown の構造、[[[CODEn]]] の形の文字列、インラインコード、URL、ファイルパス、コマンド名、識別子、すでに日本語の部分はそのまま残してください。"
-    "直した訳文の全体を <translation> と </translation> で囲んで返し、その前後には何も書かないでください。"
-)
-SARASHINA_POLISH_PROMPT = (
-    "あなたは日本語の校正者です。<source> の英文の日本語訳 <draft> を、意味を変えずに日本語として自然な文に整えてください。"
-    "直すのは、文末の体言止め、直訳調の言い回し、主語と述語がかみ合わない文だけです。それ以外の言い回しは変えないでください。"
-    "Markdown の構造、[[[CODEn]]] の形の文字列、インラインコード、URL、ファイルパス、コマンド名、識別子、すでに日本語の部分はそのまま残してください。"
-    "整えた訳文の全体を <translation> と </translation> で囲んで返し、その前後には何も書かないでください。"
-)
+TOKEN = "XQZ%dQ"
+TOKEN_PATTERN = r"XQZ(\d+)Q"
+# hook の structure と同じ数え方（段落・箇条書き・見出しの数）。translator は hook を import できない別プロセスで動くため複製する。
+LIST_ITEM_PATTERN = r"[ \t]*(?:[-*+]|\d+[.)])[ \t]"
+HEADING_PATTERN = r"#{1,6}[ \t]"
 
 
 def post_sarashina(url, key, body, timeout):
@@ -79,60 +71,84 @@ def protect_code_and_urls(text):
         return PLACEHOLDER % number + match.group(0)[len(url):]
 
     # inline code を先に照合し、バッククォートの中の URL は inline code として扱う。URL_PATTERN は閉じのバッククォートまで取り込むため。
-    # 逆に URL の直後に空白なしで続く inline code は URL ごと伏せ、mini にも見せない。
+    # 逆に URL の直後に空白なしで続く inline code は URL ごと伏せ、翻訳APIにも見せない。
     return re.sub(INLINE_CODE_PATTERN + "|" + URL_PATTERN, replace, text), codes, urls
 
 
-def restore_pieces(text, pieces, missing_ok=False):
+def restore_pieces(text, pieces):
     # 総数だけ比べると、1つが消えて別の1つが重複した訳文を通してしまうため、番号ごとに1回あることを確かめる。
     for number, piece in pieces.items():
         placeholder = PLACEHOLDER % number
-        count = text.count(placeholder)
-        # 翻訳APIは括弧の中が placeholder だけの部分を括弧ごと落とすことがある。落ちた inline code は照合で原文から補わせる。
-        if count == 0 and missing_ok:
-            continue
-        if count != 1:
+        if text.count(placeholder) != 1:
             raise RuntimeError("the translation dropped or repeated inline code or a URL")
         text = text.replace(placeholder, piece)
     return text
 
 
-def ask_mini(key, instructions, source, draft, timeout):
-    if timeout <= 0:
-        raise TimeoutError()
-    reply = post_sarashina(SARASHINA_CHAT_URL, key, {
-        "model": SARASHINA_REVIEW_MODEL,
-        "messages": [
-            {"role": "system", "content": instructions},
-            {"role": "user", "content": "<source>\n" + source + "\n</source>\n<draft>\n" + draft + "\n</draft>"},
-        ],
-        # 既定の0.7では、同じ英文でも回によって直し漏れや余計な言い換えが出たため。
-        "temperature": 0.1,
-    }, timeout)
-    content = reply["choices"][0]["message"]["content"]
-    tagged = re.fullmatch(r"\s*<translation>\n?(.*?)\n?</translation>\s*", content, re.S)
-    if tagged is None:
-        raise RuntimeError("sarashina3-mini reply is not tagged")
-    return tagged.group(1)
+def structure(text):
+    all_lines = text.split("\n")
+    paragraphs = sum(1 for i, line in enumerate(all_lines) if line.strip() and (i == 0 or not all_lines[i - 1].strip()))
+    lines = [line for line in all_lines if line.strip()]
+    return (paragraphs, sum(1 for line in lines if re.match(LIST_ITEM_PATTERN, line)),
+            sum(1 for line in lines if re.match(HEADING_PATTERN, line)))
 
 
-def call_within(budget, call):
-    # urllib の timeout は接続と受信の操作ごとにかかり、合計では timeout を超えうるため、実時間で打ち切る。
-    # 打ち切った呼び出しは止まらないが、daemon スレッドなので翻訳プログラムが結果を書いて終わるときに消える。
-    done = {}
+def translate_api(key, text, timeout, style=None):
+    body = {"text": text, "source_lang": "en", "target_lang": "ja"}
+    if style is not None:
+        body["style"] = style
+    return post_sarashina(SARASHINA_URL, key, body, timeout)["translated_text"]
 
-    def run():
-        try:
-            done["value"] = call()
-        except BaseException as exc:
-            done["error"] = exc
 
-    worker = threading.Thread(target=run, daemon=True)
-    worker.start()
-    worker.join(max(budget, 0))
-    if "error" in done and not isinstance(done["error"], TimeoutError):
-        raise done["error"]
-    return done.get("value")
+def translate_api_tokens(key, text, timeout, style=None):
+    # 翻訳APIは placeholder を括弧ごと落とすことがあり、試した62個のうち [[[CODEn]]] の形は56個、XQZnQ の形は61個が訳文に残ったため、
+    # 送る直前にこの形へ変え、受け取ったら戻す。
+    # 原文に同じ形の文字列があると戻せないので、そのときは元の形のまま送る。
+    if re.search(r"XQZ\d", text):
+        return translate_api(key, text, timeout, style=style)
+    sent = re.sub(PLACEHOLDER_PATTERN, lambda match: TOKEN % int(match.group(1)), text)
+    out = translate_api(key, sent, timeout, style=style)
+    return re.sub(TOKEN_PATTERN, lambda match: PLACEHOLDER % int(match.group(1)), out)
+
+
+def split_source(text):
+    """原文を空行の位置で2部分に分ける。各部分が5000文字の上限に収まりやすいよう、大きいほうの部分が最も小さくなる位置を選ぶ。"""
+    if len(text) < MIN_SPLIT_CHARS:
+        return [text]
+    # 区切りの空行は左の部分の末尾に残し、つなぎ直すと原文に戻るようにする。
+    cuts = [match.end() for match in re.finditer(r"\n\n", text) if match.end() < len(text)]
+    if not cuts:
+        return [text]
+    cut = min(cuts, key=lambda end: max(end, len(text) - end))
+    return [text[:cut], text[cut:]]
+
+
+def translate_piece(key, source, timeout, started):
+    # 翻訳APIは指示を受け取れず、inline code の識別子まで訳すことがあるため、inline code と URL は placeholder に置き換えて送る。
+    protected, codes, urls = protect_code_and_urls(source)
+    # APIが5000文字を超える入力を400で拒否するため、呼ばずに失敗させる。置き換えで長くなることがあるので、送る文字列で数える。
+    if len(protected) > SARASHINA_MAX_CHARS:
+        raise RuntimeError("source is longer than %d characters" % SARASHINA_MAX_CHARS)
+    pieces = list(codes) + list(urls)
+
+    def attempt(send, style=None):
+        remaining = timeout - (time.monotonic() - started)
+        # 残り時間が無いときに送ると urllib が負の timeout で失敗するため、送らずに時間切れとして扱う。
+        if remaining <= 0:
+            raise TimeoutError()
+        draft = trim_trailing_spaces(source, send(key, protected, remaining, style=style))
+        complete = (all(draft.count(PLACEHOLDER % number) == 1 for number in pieces)
+                    and structure(draft) == structure(protected))
+        return draft, complete
+
+    draft, complete = attempt(translate_api_tokens)
+    if not complete:
+        # placeholder を落とす位置は XQZnQ と [[[CODEn]]] で別々だったため、2回目は元の形で訳す。
+        # 翻訳APIは箇条書きの2項目を1つにまとめることがあり、style=plain ではそれが起きなかったため、2回目は plain にする。
+        retry, complete = attempt(translate_api, style="plain")
+        if complete:
+            draft = retry
+    return restore_pieces(restore_pieces(draft, codes), urls)
 
 
 def translate(prompt, timeout, settings):
@@ -149,48 +165,21 @@ def translate(prompt, timeout, settings):
     # 無償ベータでは送った文章が学習に使われることがあるため、キーを含む原文は送らない。
     if key in source.group(1):
         raise RuntimeError("source contains the API key")
-    # 翻訳APIは指示を受け取れず、inline code の識別子まで訳すことがあるため、placeholder に置き換えて送る。
-    protected, codes, urls = protect_code_and_urls(source.group(1))
-    # APIが5000文字を超える入力を400で拒否するため、呼ばずに失敗させる。置き換えで長くなることがあるので、送る文字列で数える。
-    if len(protected) > SARASHINA_MAX_CHARS:
-        raise RuntimeError("source is longer than %d characters" % SARASHINA_MAX_CHARS)
-    body = post_sarashina(SARASHINA_URL, key,
-                          {"text": protected, "source_lang": "en", "target_lang": "ja"},
-                          timeout)
-    draft = trim_trailing_spaces(source.group(1), body["translated_text"])
-    dropped = [piece for number, piece in codes.items() if PLACEHOLDER % number not in draft]
-    text = restore_pieces(draft, codes, missing_ok=True)
-    # URL を欠かす段が翻訳APIか sarashina3-mini か特定できていないため、URL は2回の見直しも placeholder のまま通し、最後に戻す。
-    # 照合用の原文も同じ番号の placeholder にそろえる。
-    mini_source = restore_pieces(protected, codes)
-    # 翻訳APIの訳文に残る条件・状態の取り違えを、照合で減らすため。
-    text = ask_mini(key, SARASHINA_REVIEW_PROMPT, mini_source, text, timeout - (time.monotonic() - started))
-    # 照合だけでは翻訳APIの体言止めや直訳調が残り、sarashina3-mini単体より得点が下がったため、文体だけを整える。
-    # 長文では文体の整えが時間内に終わらないことがあり、そのときは原文表示より読める照合済みの訳文を返す。
-    # 照合の時間から間に合うかを予測すると、間に合う整えまで省くため、実際に時間切れになったときだけ省く。
-    budget = timeout - (time.monotonic() - started)
-    polished = call_within(budget, lambda: ask_mini(key, SARASHINA_POLISH_PROMPT, mini_source, text, budget))
-    if polished is not None:
-        text = polished
-    # 存在だけを調べると、原文に同じ inline code が2回あって片方が落ち、照合でも補われない訳文を通してしまうため、出現回数まで比べる。
-    if any(text.count(piece) < mini_source.count(piece) for piece in dropped):
-        # 照合や整えでは欠落を補えないことがあるが、hook の翻訳指示と原文を渡して直接訳させると残るため、その経路に切り替える。
-        budget = timeout - (time.monotonic() - started)
-        # 残り時間が無いときに送ると urllib が負の timeout で失敗するため、送らずに答が無いものとして扱う。
-        reply = None
-        if budget > 0:
-            reply = call_within(budget, lambda: post_sarashina(SARASHINA_CHAT_URL, key, {
-                "model": SARASHINA_REVIEW_MODEL,
-                "messages": [
-                    {"role": "system", "content": prompt},
-                    # "Translate the source." では、1行の短い英文を訳さずにそのまま返すことがあったため、訳す先の言語を書く。
-                    {"role": "user", "content": "Translate the source into Japanese."},
-                ],
-            }, budget))
-        # 元の失敗は時間切れではないので、hook の5分休止を起こす TimeoutError にはしない。
-        content = reply["choices"][0]["message"]["content"] if reply is not None else ""
-        if any(content.count(piece) < mini_source.count(piece) for piece in codes.values()):
-            raise RuntimeError("the translation dropped inline code")
-        # <translation> タグと URL の検査は hook が行い、URL はこの経路で placeholder 化していないので戻さない。
-        return content
-    return "<translation>\n" + restore_pieces(text, urls) + "\n</translation>"
+    source = source.group(1)
+    parts = split_source(source)
+    if len(parts) == 1:
+        text = translate_piece(key, source, timeout, started)
+    else:
+        def translate_part(part):
+            body = part.rstrip("\n")
+            tail = part[len(body):]
+            # 英字を含まない部分は訳すものがないので、送らずにそのまま残す。
+            if not re.search(r"[A-Za-z]", re.sub(PLACEHOLDER_PATTERN, "", body)):
+                return part
+            return translate_piece(key, body, timeout, started) + tail
+
+        with concurrent.futures.ThreadPoolExecutor(len(parts)) as pool:
+            futures = [pool.submit(translate_part, part) for part in parts]
+            # どれか1つでも失敗したら、その例外をそのまま伝える。スレッドは止められないので、伝えるのはもう片方が終わってから。
+            text = "".join(future.result() for future in futures)
+    return "<translation>\n" + text + "\n</translation>"

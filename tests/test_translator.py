@@ -4,10 +4,12 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import urllib.error
@@ -195,9 +197,9 @@ class ModelFileTest(HookTestCase):
         self.assert_shows_original(outputs, "timeout")
         self.assertTrue((self.state / "last-failure").is_file())
 
-    def test_sarashina_returns_the_reviewed_draft_before_the_hook_deadline(self):
-        # 起動と設定の読み込みに hook の猶予（1秒）より長くかかり、文体の整えが自分の timeout を超えて止まらなくても、
-        # hook の期限より前に照合済みの訳文を返し、cooldown に入らない。
+    def test_sarashina_returns_the_translated_draft_through_the_hook_runner(self):
+        # 同梱の sarashina.py を hook の runner（別プロセス）で通し、翻訳 API だけで result=translated になることを確かめる。
+        # 起動と設定の読み込みにかかった時間を持ち時間から差し引いて渡すことも確かめる。
         target = self.config / "translators"
         for name in ("_cli.py", "sarashina.py"):
             (target / name).write_text((TRANSLATORS / name).read_text(encoding="utf-8"), encoding="utf-8")
@@ -206,25 +208,22 @@ class ModelFileTest(HookTestCase):
         self.use_settings("sarashina", "\n".join([
             "SARASHINA_API_KEY_FILE = %r" % str(key),
             "import io, json, re, time, urllib.request",
+            # 設定の読み込みにかかった時間は、runner が持ち時間（3秒）から差し引いて翻訳に渡す。
             "time.sleep(1.5)",
             "def reply(value):",
             "    return io.BytesIO(json.dumps(value).encode('utf-8'))",
             "def urlopen(request, timeout):",
             "    body = json.loads(request.data)",
-            "    if 'text' in body:",
-            "        return reply({'translated_text': '\\n'.join(l + ' やく' if l else l for l in body['text'].split('\\n'))})",
-            "    draft = re.search(r'<draft>\\n(.*)\\n</draft>', body['messages'][1]['content'], re.S).group(1)",
-            "    if '校閲者' in body['messages'][0]['content']:",
-            "        return reply({'choices': [{'message': {'content': '<translation>\\n' + draft + ' しょうごう\\n</translation>'}}]})",
-            "    time.sleep(timeout + 30)",
+            "    assert request.full_url == 'https://api.sarashina.ai/v1/translate'",
+            "    assert 0 < timeout < 2, timeout",
+            "    text = re.sub(r'XQZ(\\d+)Q', r'[[[CODE\\1]]]', body['text'])",
+            "    return reply({'translated_text': '\\n'.join(l + ' やく' if l else l for l in text.split('\\n'))})",
             "urllib.request.urlopen = urlopen",
             "",
         ]))
-        self.env["MSGDISP_CHILD_TIMEOUT"] = "2"
-        started = time.monotonic()
+        self.env["MSGDISP_CHILD_TIMEOUT"] = "3"
         outputs = self.run_flushes([*ENGLISH, ""])
-        self.assertLess(time.monotonic() - started, 10)
-        self.assertIn("しょうごう", outputs[2])
+        self.assertIn("やく", outputs[2])
         self.assertIn("result=translated", self.log())
         self.assertFalse((self.state / "last-failure").exists())
 
@@ -486,63 +485,63 @@ class BundledTest(unittest.TestCase):
         key_file.write_text("test-key-0123\n", encoding="utf-8")
         return load("sarashina_check", TRANSLATORS / "sarashina.py"), types.SimpleNamespace(SARASHINA_API_KEY_FILE=str(key_file))
 
-    def test_sarashina_drafts_reviews_and_polishes(self):
-        sarashina, settings = self.load_sarashina()
-        requests = []
-        replies = [{"translated_text": "こんにちは [[[CODE1000]]]  "},
-                   {"choices": [{"message": {"content": "<translation>\nしょうごう\n</translation>"}}]},
-                   {"choices": [{"message": {"content": "<translation>\nやく\n</translation>"}}]}]
-
-        def urlopen(request, timeout):
-            requests.append((request.get_header("Authorization"), json.loads(request.data), timeout))
-            return io.BytesIO(json.dumps(replies[len(requests) - 1]).encode("utf-8"))
-
-        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
-            self.assertEqual(sarashina.translate(PROMPT, 12, settings), "<translation>\nやく\n</translation>")
-        (authorization, draft_body, _), (_, review_body, _), (_, polish_body, _) = requests
-        # キーのファイルの末尾の改行は落とし、翻訳 API には指示を含めず原文だけを送る。
-        self.assertEqual(authorization, "Bearer test-key-0123")
-        self.assertEqual(draft_body, {"text": "Hello [[[CODE1000]]]", "source_lang": "en", "target_lang": "ja"})
-        self.assertEqual(review_body["messages"][0]["content"], sarashina.SARASHINA_REVIEW_PROMPT)
-        self.assertIn("<draft>\nこんにちは [[[CODE1000]]]\n</draft>", review_body["messages"][1]["content"])
-        self.assertEqual(polish_body["messages"][0]["content"], sarashina.SARASHINA_POLISH_PROMPT)
-        self.assertIn("<draft>\nしょうごう\n</draft>", polish_body["messages"][1]["content"])
-        for body in (review_body, polish_body):
-            self.assertEqual((body["model"], body["temperature"]), ("sarashina3-mini", 0.1))
-
-    def test_sarashina_keeps_inline_code_away_from_the_translation_api(self):
-        # 翻訳 API は inline code の識別子まで訳すので、placeholder にして送り、照合の前に元へ戻す。
-        sarashina, settings = self.load_sarashina()
-        # hook が inline code の欠落を検査する規則とずれると、検査で落ちる inline code を守れない。
+    def test_sarashina_keeps_the_hook_rules_and_adds_structure_rules(self):
+        sarashina, _ = self.load_sarashina()
+        # hook が inline code の欠落や構造の違いを検査する規則とずれると、検査で落ちる訳文を守れない。
         hook = runpy.run_path(str(HOOK), run_name="hook_check")
-        for name in ("INLINE_CODE_PATTERN", "URL_PATTERN", "URL_TRAILING_PUNCTUATION", "PLACEHOLDER", "PLACEHOLDER_PATTERN"):
+        for name in ("INLINE_CODE_PATTERN", "URL_PATTERN", "URL_TRAILING_PUNCTUATION", "PLACEHOLDER",
+                     "PLACEHOLDER_PATTERN", "LIST_ITEM_PATTERN", "HEADING_PATTERN"):
             self.assertEqual(getattr(sarashina, name), hook[name])
+
+    def test_sarashina_sends_tokens_and_restores_inline_code(self):
+        # 翻訳 API は inline code の識別子まで訳すので、XQZnQ にして送り、訳文で元の inline code に戻す。
+        # 翻訳 API には指示を含めず原文だけを送る。
+        sarashina, settings = self.load_sarashina()
+        # hook が伏せたコードブロックの [[[CODE1000]]] と番号が衝突しないよう、inline code はその次の番号から振る。
         prompt = "Instructions.\n\n<source>\nRun `make` then [[[CODE1000]]] and `make test`.\n</source>"
         requests = []
-        # 訳文で語順が入れ替わっても、番号どおりの inline code へ戻す。
-        replies = [{"translated_text": "[[[CODE1002]]] の前に [[[CODE1000]]] と [[[CODE1001]]] を実行します。"},
-                   {"choices": [{"message": {"content": "<translation>\nやく\n</translation>"}}]},
-                   {"choices": [{"message": {"content": "<translation>\nやく\n</translation>"}}]}]
 
         def urlopen(request, timeout):
-            requests.append(json.loads(request.data))
-            return io.BytesIO(json.dumps(replies[len(requests) - 1]).encode("utf-8"))
+            requests.append((request.full_url, request.get_header("Authorization"), json.loads(request.data)))
+            return io.BytesIO(json.dumps({"translated_text": "XQZ1002Q の前に XQZ1000Q と XQZ1001Q を実行します。"}).encode("utf-8"))
 
         with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
-            sarashina.translate(prompt, 12, settings)
-        # hook が伏せたコードブロックの番号とは衝突させない。
-        self.assertEqual(requests[0]["text"], "Run [[[CODE1001]]] then [[[CODE1000]]] and [[[CODE1002]]].")
-        self.assertIn("<draft>\n`make test` の前に [[[CODE1000]]] と `make` を実行します。\n</draft>",
-                      requests[1]["messages"][1]["content"])
+            self.assertEqual(sarashina.translate(prompt, 12, settings),
+                             "<translation>\n`make test` の前に [[[CODE1000]]] と `make` を実行します。\n</translation>")
+        (url, authorization, body), = requests
+        self.assertEqual(url, sarashina.SARASHINA_URL)
+        # キーのファイルの末尾の改行は落として送る。
+        self.assertEqual(authorization, "Bearer test-key-0123")
+        self.assertEqual(body, {"text": "Run XQZ1001Q then XQZ1000Q and XQZ1002Q.", "source_lang": "en", "target_lang": "ja"})
 
-    def test_sarashina_keeps_urls_away_from_the_api_and_the_reviews(self):
-        # URL を欠かす段は特定できていないので、翻訳 API にも2回の見直しにも URL を見せず、最後に戻す。
+    def test_sarashina_retries_with_plain_when_placeholders_are_dropped_or_repeated(self):
         sarashina, settings = self.load_sarashina()
-        prompt = "Instructions.\n\n<source>\nSee https://example.com/a. Run `curl https://example.com/b`.\n</source>"
+        prompt = "Instructions.\n\n<source>\nRun `a` and `b`.\n</source>"
+        for first in ("XQZ0Q を実行します。", "XQZ0Q と XQZ0Q を実行します。"):
+            with self.subTest(first=first):
+                requests = []
+                replies = [{"translated_text": first},
+                           {"translated_text": "[[[CODE0]]] と [[[CODE1]]] を実行します。"}]
+
+                def urlopen(request, timeout):
+                    requests.append(json.loads(request.data))
+                    return io.BytesIO(json.dumps(replies[len(requests) - 1]).encode("utf-8"))
+
+                with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
+                    self.assertEqual(sarashina.translate(prompt, 12, settings),
+                                     "<translation>\n`a` と `b` を実行します。\n</translation>")
+                self.assertEqual(len(requests), 2)
+                self.assertNotIn("style", requests[0])
+                self.assertEqual(requests[1]["style"], "plain")
+                # 訳し直しは XQZnQ ではなく [[[CODEn]]] の形で送る。
+                self.assertEqual(requests[1]["text"], "Run [[[CODE0]]] and [[[CODE1]]].")
+
+    def test_sarashina_retries_with_plain_when_the_structure_changes(self):
+        sarashina, settings = self.load_sarashina()
+        prompt = "Instructions.\n\n<source>\nRun `a` then:\n- one\n- two\n</source>"
         requests = []
-        replies = [{"translated_text": "[[[CODE0]]] を参照し、[[[CODE1]]] を実行します。"},
-                   {"choices": [{"message": {"content": "<translation>\n[[[CODE0]]] を見て、`curl https://example.com/b` を実行します。\n</translation>"}}]},
-                   {"choices": [{"message": {"content": "<translation>\n[[[CODE0]]] を見てから `curl https://example.com/b` を実行します。\n</translation>"}}]}]
+        replies = [{"translated_text": "XQZ0Q を実行します。\n- いち、に"},
+                   {"translated_text": "[[[CODE0]]] を実行します。\n- いち\n- に"}]
 
         def urlopen(request, timeout):
             requests.append(json.loads(request.data))
@@ -550,171 +549,170 @@ class BundledTest(unittest.TestCase):
 
         with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
             self.assertEqual(sarashina.translate(prompt, 12, settings),
-                             "<translation>\nhttps://example.com/a を見てから `curl https://example.com/b` を実行します。\n</translation>")
-        # 文末の句読点は placeholder の外に残す。inline code の中の URL は inline code ごと伏せる。
-        self.assertEqual(requests[0]["text"], "See [[[CODE0]]]. Run [[[CODE1]]].")
-        for body in requests[1:]:
-            self.assertIn("<source>\nSee [[[CODE0]]]. Run `curl https://example.com/b`.\n</source>",
-                          body["messages"][1]["content"])
-            self.assertNotIn("example.com/a", body["messages"][1]["content"])
+                             "<translation>\n`a` を実行します。\n- いち\n- に\n</translation>")
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[1]["style"], "plain")
 
-    def test_sarashina_fails_when_a_review_drops_or_repeats_a_url(self):
+    def test_sarashina_keeps_the_first_draft_when_the_retry_drops_a_placeholder(self):
+        # 1回目は placeholder が揃っていて構造だけ違う。2回目が placeholder を落としたら1回目を使う。
         sarashina, settings = self.load_sarashina()
-        prompt = "Instructions.\n\n<source>\nSee https://example.com/a for details.\n</source>"
-        for polished in ("詳細を参照してください。", "[[[CODE0]]] と [[[CODE0]]] を参照してください。"):
-            replies = [{"translated_text": "詳細は [[[CODE0]]] を参照してください。"},
-                       {"choices": [{"message": {"content": "<translation>\n詳細は [[[CODE0]]] を参照してください。\n</translation>"}}]},
-                       {"choices": [{"message": {"content": "<translation>\n" + polished + "\n</translation>"}}]}]
-            responses = iter(io.BytesIO(json.dumps(reply).encode("utf-8")) for reply in replies)
-            with self.subTest(polished=polished), \
-                    mock.patch.object(sarashina.urllib.request, "urlopen", lambda request, timeout: next(responses)), \
-                    self.assertRaises(RuntimeError):
-                sarashina.translate(prompt, 12, settings)
+        prompt = "Instructions.\n\n<source>\nRun `a` then:\n- one\n- two\n</source>"
+        requests = []
+        replies = [{"translated_text": "XQZ0Q を実行します。\n- いち、に"},
+                   {"translated_text": "を実行します。\n- いち\n- に"}]
 
-    def test_sarashina_fails_when_inline_code_comes_back_repeatedly(self):
+        def urlopen(request, timeout):
+            requests.append(json.loads(request.data))
+            return io.BytesIO(json.dumps(replies[len(requests) - 1]).encode("utf-8"))
+
+        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
+            self.assertEqual(sarashina.translate(prompt, 12, settings),
+                             "<translation>\n`a` を実行します。\n- いち、に\n</translation>")
+        self.assertEqual(len(requests), 2)
+
+    def test_sarashina_fails_when_both_attempts_drop_a_placeholder(self):
+        sarashina, settings = self.load_sarashina()
+        prompt = "Instructions.\n\n<source>\nRun `a` and `b`.\n</source>"
+        requests = []
+        replies = [{"translated_text": "XQZ0Q を実行します。"},
+                   {"translated_text": "を実行します。"}]
+
+        def urlopen(request, timeout):
+            requests.append(json.loads(request.data))
+            return io.BytesIO(json.dumps(replies[len(requests) - 1]).encode("utf-8"))
+
+        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen), self.assertRaises(RuntimeError):
+            sarashina.translate(prompt, 12, settings)
+        self.assertEqual(len(requests), 2)
+
+    def test_sarashina_keeps_the_placeholder_form_when_the_source_contains_a_token_shape(self):
+        # 原文に XQZ<数字> があるときは変換せず、[[[CODEn]]] のまま送る。化けた形を表示しない。
+        sarashina, settings = self.load_sarashina()
+        prompt = "Instructions.\n\n<source>\nRun `a` on XQZ7.\n</source>"
+        requests = []
+        replies = [{"translated_text": "XQZ7 で [[[CODE0]]] を実行します。"}]
+
+        def urlopen(request, timeout):
+            requests.append(json.loads(request.data))
+            return io.BytesIO(json.dumps(replies[len(requests) - 1]).encode("utf-8"))
+
+        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
+            self.assertEqual(sarashina.translate(prompt, 12, settings),
+                             "<translation>\nXQZ7 で `a` を実行します。\n</translation>")
+        (body,) = requests
+        self.assertEqual(body["text"], "Run [[[CODE0]]] on XQZ7.")
+        self.assertNotIn("XQZ0Q", body["text"])
+
+    def test_sarashina_splits_a_long_source_and_joins_the_parts_in_order(self):
+        sarashina, settings = self.load_sarashina()
+        # 冒頭に短い段落を置き、最初の空行ではなく、大きいほうの部分が最も小さくなる空行で切ることを確かめる。
+        # 8000字近い原文でも、各部分は5000字以下で送る。
+        left = "Intro.\n\nAAAA `a` " + "x" * 4000 + "\n\n"
+        right = "BBBB `b` " + "y" * 4000
+        prompt = "Instructions.\n\n<source>\n" + left + right + "\n</source>"
+        calls = []
+        counts = {"A": 0, "B": 0}
+        lock = threading.Lock()
+
+        def urlopen(request, timeout):
+            body = json.loads(request.data)
+            key = "A" if "AAAA" in body["text"] else "B"
+            with lock:
+                # 並列なので、呼び出しの順番ではなく body["text"] の内容で応答を決める。
+                counts[key] += 1
+                count = counts[key]
+                calls.append((request.full_url, body, timeout))
+            placeholders = re.findall(r"\[\[\[CODE\d+\]\]\]|XQZ\d+Q", body["text"])
+            if count == 1:
+                # 1回目は placeholder を落として訳し直しを起こす。2回目で揃う。
+                placeholders = []
+            prefix = "序。\n\nA訳 " if key == "A" else "B訳 "
+            return io.BytesIO(json.dumps({"translated_text": prefix + "".join(placeholders) + "を実行します。"}).encode("utf-8"))
+
+        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
+            result = sarashina.translate(prompt, 12, settings)
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all(url == sarashina.SARASHINA_URL for url, _, _ in calls))
+        self.assertTrue(all(len(body["text"]) <= sarashina.SARASHINA_MAX_CHARS for _, body, _ in calls))
+        self.assertEqual([body.get("style") for _, body, _ in calls].count("plain"), 2)
+        # 並列でも原文の順序どおりにつなぎ、部分の間の空行を残す。
+        self.assertEqual(result, "<translation>\n序。\n\nA訳 `a`を実行します。\n\nB訳 `b`を実行します。\n</translation>")
+
+    def test_sarashina_leaves_a_part_without_latin_letters_unsent(self):
+        sarashina, settings = self.load_sarashina()
+        left = "AAAA `a` " + "x" * 4000 + "\n\n"
+        right = "あ" * 4009
+        prompt = "Instructions.\n\n<source>\n" + left + right + "\n</source>"
+        calls = []
+
+        def urlopen(request, timeout):
+            body = json.loads(request.data)
+            calls.append(body)
+            placeholders = re.findall(r"\[\[\[CODE\d+\]\]\]|XQZ\d+Q", body["text"])
+            return io.BytesIO(json.dumps({"translated_text": "A訳 " + "".join(placeholders) + "を実行します。"}).encode("utf-8"))
+
+        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
+            result = sarashina.translate(prompt, 12, settings)
+        # 英字を含まない部分は送らない。
+        self.assertEqual(len(calls), 1)
+        self.assertIn("A訳 `a`を実行します。", result)
+        self.assertIn(right, result)
+        self.assertLess(result.index("A訳 `a`を実行します。"), result.index(right))
+
+    def test_sarashina_restores_urls_after_the_translation_api(self):
+        sarashina, settings = self.load_sarashina()
+        prompt = "Instructions.\n\n<source>\nSee https://example.com/a. Run `curl https://example.com/b`.\n</source>"
+        requests = []
+        replies = [{"translated_text": "XQZ1Q を参照し、XQZ0Q を実行します。"}]
+
+        def urlopen(request, timeout):
+            requests.append(json.loads(request.data))
+            return io.BytesIO(json.dumps(replies[len(requests) - 1]).encode("utf-8"))
+
+        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
+            self.assertEqual(sarashina.translate(prompt, 12, settings),
+                             "<translation>\n`curl https://example.com/b` を参照し、https://example.com/a を実行します。\n</translation>")
+        # 文末の句読点は placeholder の外に残す。inline code の中の URL は inline code ごと伏せる。
+        self.assertEqual(requests[0]["text"], "See XQZ0Q. Run XQZ1Q.")
+
+    def test_sarashina_fails_when_placeholders_come_back_repeatedly(self):
         sarashina, settings = self.load_sarashina()
         prompt = "Instructions.\n\n<source>\nRun `a` and `b`.\n</source>"
         # 総数が同じままの欠落と重複、欠落のない重複のどちらも戻さない。
-        for draft in ("[[[CODE0]]] と [[[CODE0]]] を実行します。",
-                      "[[[CODE0]]] と [[[CODE1]]] と [[[CODE1]]] を実行します。"):
-            reply = io.BytesIO(json.dumps({"translated_text": draft}).encode("utf-8"))
-            with self.subTest(draft=draft), \
-                    mock.patch.object(sarashina.urllib.request, "urlopen", return_value=reply), \
-                    self.assertRaises(RuntimeError):
-                sarashina.translate(prompt, 12, settings)
+        for drafts in (("XQZ0Q と XQZ0Q を実行します。", "[[[CODE0]]] と [[[CODE0]]] を実行します。"),
+                       ("XQZ0Q と XQZ1Q と XQZ1Q を実行します。",
+                        "[[[CODE0]]] と [[[CODE1]]] と [[[CODE1]]] を実行します。")):
+            with self.subTest(drafts=drafts):
+                responses = iter(io.BytesIO(json.dumps({"translated_text": draft}).encode("utf-8"))
+                                 for draft in drafts)
+                with mock.patch.object(sarashina.urllib.request, "urlopen",
+                                       lambda request, timeout: next(responses)), \
+                        self.assertRaises(RuntimeError):
+                    sarashina.translate(prompt, 12, settings)
         # 原文は5000文字以内でも、置き換えで5000文字を超えるなら送らない。
         prompt = "Instructions.\n\n<source>\n" + "`a` " * 1000 + "\n</source>"
         with mock.patch.object(sarashina.urllib.request, "urlopen", side_effect=AssertionError("sent")), \
                 self.assertRaises(RuntimeError):
             sarashina.translate(prompt, 12, settings)
 
-    def test_sarashina_reviews_inline_code_the_translation_api_dropped(self):
-        # 翻訳 API は括弧の中が placeholder だけの部分を括弧ごと落とすことがある。落ちた inline code は照合で原文から補う。
-        sarashina, settings = self.load_sarashina()
-        prompt = "Instructions.\n\n<source>\nRun `a` and `b`.\n</source>"
-        requests = []
-        replies = [{"translated_text": "[[[CODE0]]] を実行します。"},
-                   {"choices": [{"message": {"content": "<translation>\n`a` と `b` を実行します。\n</translation>"}}]},
-                   {"choices": [{"message": {"content": "<translation>\n`a` と `b` を実行してください。\n</translation>"}}]}]
-
-        def urlopen(request, timeout):
-            requests.append(json.loads(request.data))
-            return io.BytesIO(json.dumps(replies[len(requests) - 1]).encode("utf-8"))
-
-        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
-            self.assertEqual(sarashina.translate(prompt, 12, settings),
-                             "<translation>\n`a` と `b` を実行してください。\n</translation>")
-        # 落ちた inline code は下訳に戻さず、照合用の原文から補わせる。
-        review = requests[1]["messages"][1]["content"]
-        self.assertIn("<draft>\n`a` を実行します。\n</draft>", review)
-        self.assertNotIn("[[[CODE1]]]", review)
-        self.assertIn("<source>\nRun `a` and `b`.\n</source>", review)
-
-    def test_sarashina_translates_the_source_directly_when_a_review_does_not_restore_inline_code(self):
-        # 翻訳 API が落とした inline code を見直しでも補えないときは、hook の翻訳指示で sarashina3-mini に原文から直接訳させる。
-        sarashina, settings = self.load_sarashina()
-        prompt = "Instructions.\n\n<source>\nRun `a` and `a`.\n</source>"
-        requests = []
-        replies = [{"translated_text": "[[[CODE0]]] を実行します。"},
-                   {"choices": [{"message": {"content": "<translation>\n`a` を実行します。\n</translation>"}}]},
-                   {"choices": [{"message": {"content": "<translation>\n`a` を実行してください。\n</translation>"}}]},
-                   {"choices": [{"message": {"content": "<translation>\n`a` と `a` を実行してください。\n</translation>"}}]}]
-
-        def urlopen(request, timeout):
-            requests.append(json.loads(request.data))
-            return io.BytesIO(json.dumps(replies[len(requests) - 1]).encode("utf-8"))
-
-        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
-            self.assertEqual(sarashina.translate(prompt, 12, settings),
-                             "<translation>\n`a` と `a` を実行してください。\n</translation>")
-        direct = requests[3]
-        self.assertEqual(direct["model"], "sarashina3-mini")
-        self.assertEqual(direct["messages"], [{"role": "system", "content": prompt},
-                                              {"role": "user", "content": "Translate the source into Japanese."}])
-        self.assertNotIn("temperature", direct)
-
-    def test_sarashina_fails_when_a_review_does_not_restore_inline_code_as_often_as_the_source(self):
-        # 直接の翻訳でも inline code が原文より少ないときは、hook が原文を表示できるよう失敗させる。
-        sarashina, settings = self.load_sarashina()
-        prompt = "Instructions.\n\n<source>\nRun `a` and `a`.\n</source>"
-        replies = [{"translated_text": "[[[CODE0]]] を実行します。"},
-                   {"choices": [{"message": {"content": "<translation>\n`a` を実行します。\n</translation>"}}]},
-                   {"choices": [{"message": {"content": "<translation>\n`a` を実行してください。\n</translation>"}}]},
-                   {"choices": [{"message": {"content": "`a` を実行してください。"}}]}]
-        responses = iter(io.BytesIO(json.dumps(reply).encode("utf-8")) for reply in replies)
-        with mock.patch.object(sarashina.urllib.request, "urlopen", lambda request, timeout: next(responses)), \
-                self.assertRaises(RuntimeError):
-            sarashina.translate(prompt, 12, settings)
-        # 直接の翻訳の前に時間を使い切ったときは送らずに失敗させ、hook の5分休止を起こす TimeoutError にはしない。
-        sent = []
-
-        def urlopen(request, timeout):
-            sent.append(timeout)
-            return io.BytesIO(json.dumps(replies[len(sent) - 1]).encode("utf-8"))
-
-        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen), \
-                mock.patch.object(sarashina.time, "monotonic", side_effect=[100.0, 103.0, 105.0, 112.0]), \
-                self.assertRaises(RuntimeError):
-            sarashina.translate(prompt, 12, settings)
-        self.assertEqual(len(sent), 3)
-        # 直接の翻訳の応答待ちで時間切れになったときも、TimeoutError ではなく RuntimeError で失敗させる。
-        sent.clear()
-
-        def urlopen_timing_out(request, timeout):
-            sent.append(timeout)
-            if len(sent) == 4:
-                raise TimeoutError()
-            return io.BytesIO(json.dumps(replies[len(sent) - 1]).encode("utf-8"))
-
-        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen_timing_out), \
-                self.assertRaises(RuntimeError):
-            sarashina.translate(prompt, 12, settings)
-        self.assertEqual(len(sent), 4)
-
     def test_sarashina_passes_the_remaining_time_and_stops_when_it_runs_out(self):
         sarashina, settings = self.load_sarashina()
         timeouts = []
-        replies = [{"translated_text": "やく"}, {"choices": [{"message": {"content": "<translation>\nしょうごう\n</translation>"}}]},
-                   {"choices": [{"message": {"content": "<translation>\nととのえ\n</translation>"}}]}]
 
         def urlopen(request, timeout):
             timeouts.append(timeout)
-            return io.BytesIO(json.dumps(replies[len(timeouts) - 1]).encode("utf-8"))
+            return io.BytesIO(b'{"translated_text": "\xe3\x82\x84\xe3\x81\x8f"}')
 
-        # 開始、照合の前、文体の整えの前に時計を読み、各段に残り時間を渡す。
+        # 開始と送信の直前に時計を読み、残り時間を渡す。
         with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen), \
-                mock.patch.object(sarashina.time, "monotonic", side_effect=[100.0, 103.0, 105.0]):
-            self.assertEqual(sarashina.translate(PROMPT, 12, settings), "<translation>\nととのえ\n</translation>")
-        self.assertEqual(timeouts, [12, 9.0, 7.0])
-        # 照合のあとで使い切ったときは、文体の整えを呼ばず、照合済みの訳文を返す。
-        timeouts.clear()
-        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen), \
-                mock.patch.object(sarashina.time, "monotonic", side_effect=[100.0, 103.0, 112.0]):
-            self.assertEqual(sarashina.translate(PROMPT, 12, settings), "<translation>\nしょうごう\n</translation>")
-        self.assertEqual(timeouts, [12, 9.0])
-        # 照合までに使い切ったときは、hook が翻訳を休めるよう時間切れのまま返す。
-        with mock.patch.object(sarashina.urllib.request, "urlopen", return_value=io.BytesIO(b'{"translated_text": "x"}')), \
+                mock.patch.object(sarashina.time, "monotonic", side_effect=[100.0, 103.0]):
+            self.assertEqual(sarashina.translate(PROMPT, 12, settings), "<translation>\nやく\n</translation>")
+        self.assertEqual(timeouts, [9.0])
+        # 送る前に使い切ったときは、送らずに時間切れのまま返し、hook が翻訳を休めるようにする。
+        with mock.patch.object(sarashina.urllib.request, "urlopen", side_effect=AssertionError("sent")), \
                 mock.patch.object(sarashina.time, "monotonic", side_effect=[100.0, 112.0]), \
                 self.assertRaises(TimeoutError):
             sarashina.translate(PROMPT, 12, settings)
-
-    def test_sarashina_returns_the_reviewed_draft_when_polishing_times_out(self):
-        # 文体の整えの応答待ちで時間切れになっても、照合済みの訳文を URL を戻して返す。
-        sarashina, settings = self.load_sarashina()
-        prompt = "Instructions.\n\n<source>\nSee https://example.com/a for details.\n</source>"
-        replies = iter([io.BytesIO(json.dumps({"translated_text": "詳細は [[[CODE0]]] を参照。"}).encode("utf-8")),
-                        io.BytesIO(json.dumps({"choices": [{"message": {"content": "<translation>\n詳細は [[[CODE0]]] を参照してください。\n</translation>"}}]}).encode("utf-8")),
-                        TimeoutError()])
-
-        def urlopen(request, timeout):
-            reply = next(replies)
-            if isinstance(reply, Exception):
-                raise reply
-            return reply
-
-        with mock.patch.object(sarashina.urllib.request, "urlopen", urlopen):
-            self.assertEqual(sarashina.translate(prompt, 12, settings),
-                             "<translation>\n詳細は https://example.com/a を参照してください。\n</translation>")
 
     def test_sarashina_does_not_send_a_source_that_contains_the_key(self):
         sarashina, settings = self.load_sarashina()
