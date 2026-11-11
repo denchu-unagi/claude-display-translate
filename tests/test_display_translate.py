@@ -368,6 +368,47 @@ class TranslationFlowTest(HookTestCase):
         self.assertFalse(marker.exists())
         self.assertIn("skipped_mostly_ja", self.log())
 
+    def test_keeps_table_rows_original_in_a_mostly_japanese_message(self):
+        # 日本語が大半のメッセージでは、表の外の英語の行だけを訳し、表の行は日本語の行と同じく翻訳に送らずに原文のまま表示する。
+        # 表のセルの担当名やモデル名を送ると、翻訳 API が名前まで訳す（fable を「寓話」にするなど）。
+        received = self.root / "received.txt"
+        self.use_line_translator(received)
+        table = "| 工程 | 担当 | モデル |\n|---|---|---|\n| 調査 | worker | example-model-2 / high |\n"
+        deltas = ["Reviewing the pull request for the thinking note and README ",
+                  "の変更点を確認し、問題なければマージします。\n",
+                  "コミットをプッシュして、レビューもおわりました。あとはマージをまつだけです。\n\n" + table
+                  + "\n    - Parse the config and validate it before saving.\n", ""]
+        outputs = self.run_flushes(deltas)
+        self.assertEqual(outputs, [MARK, "", "", "".join(deltas).replace("before saving.", "before saving. やく")])
+        sent = received.read_text(encoding="utf-8")
+        self.assertNotIn("worker", sent)
+        self.assertNotIn("|", sent)
+
+    def test_keeps_a_table_whole_when_the_translation_adds_blank_lines(self):
+        # 訳文で placeholder の行の後に空行が入っても、連続する表の行は1つの placeholder にまとめて伏せるので、戻した表が途切れない。
+        self.use_child("\n".join([
+            "import re, sys",
+            "prompt = open(sys.argv[sys.argv.index('--system-prompt-file') + 1], encoding='utf-8').read()",
+            "source = re.search(r'<source>\\n(.*)\\n</source>', prompt, re.S).group(1)",
+            "hidden = r'[ \\t>#*+0-9.)-]*\\[\\[\\[CODE\\d+\\]\\]\\]'",
+            "lines = []",
+            "for line in source.split('\\n'):",
+            "    lines.append(line if not line.strip() or re.fullmatch(hidden, line) else line + ' やく')",
+            "    if re.fullmatch(hidden, line):",
+            "        lines.append('')",
+            "print('<translation>\\n' + '\\n'.join(lines) + '\\n</translation>')",
+            "",
+        ]))
+        table = "| 工程 | 担当 | モデル |\n|---|---|---|\n| 調査 | worker | example-model-2 / high |\n"
+        deltas = ["Reviewing the pull request for the thinking note and README ",
+                  "の変更点を確認し、問題なければマージします。\n",
+                  "コミットをプッシュして、レビューもおわりました。あとはマージをまつだけです。\n\n" + table
+                  + "\n    - Parse the config and validate it before saving.\n", ""]
+        outputs = self.run_flushes(deltas)
+        self.assertEqual(outputs[0], MARK)
+        self.assertIn(table, outputs[3])
+        self.assertIn("before saving. やく", outputs[3])
+
     def test_does_not_repeat_a_line_shown_before_the_language_was_decided(self):
         self.use_translator()
         # 並行に起動したflushが逆順に処理され、短いflush 1が言語確定前に原文で表示された状況を固定する。

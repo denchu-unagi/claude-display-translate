@@ -206,6 +206,10 @@ def body_tokens(body):
 
 
 def hide_japanese_line(line):
+    # 表の行も日本語の行と同じく伏せる。日本語が大半のメッセージの表のセルは、日本語か、担当名・モデル名・見出しなどの文脈のない短い語が多く、
+    # 訳す語が無いか、セルだけを訳すと誤訳になりやすい（翻訳 API は fable を「寓話」にする）。切り替えの判定でも、表の行を英語の行として数えない。
+    if re.match(TABLE_ROW_PATTERN, line):
+        return True
     if not re.search(JA_CLASS, line):
         return False
     counts = count_tokens(body_tokens(split_line_prefix(line)[1]))
@@ -214,12 +218,8 @@ def hide_japanese_line(line):
 
 def remaining_english(text):
     # 伏せた行とコードの placeholder は訳す本文ではないので、英字数に数えない。
-    # 表の行は担当名やモデル名などの訳さない語が多いので数えない。数えると、言語の切り替えでは表の途中に印が出て表の1行になり、
-    # 日本語が大半の返答では訳す語の無い表だけを送り、訳文に仮名が増えないため翻訳失敗になる。
     english = 0
     for line in text.split("\n"):
-        if re.match(TABLE_ROW_PATTERN, line):
-            continue
         body = re.sub(PLACEHOLDER_PATTERN, " ", split_line_prefix(line)[1])
         english += count_tokens(body_tokens(body))[2]
     return english
@@ -309,14 +309,22 @@ def protect_code(text, hide_japanese=False):
     text = re.sub(FENCE_PATTERN, replace, text)
     # 日本語の行は予約タグより先に伏せる。後に伏せると行の本文にタグの placeholder が入り、戻せなくなる。
     if hide_japanese:
-        lines = text.split("\n")
-        for number, line in enumerate(lines):
+        lines, table_block = [], None
+        for line in text.split("\n"):
             if not hide_japanese_line(line):
+                lines.append(line)
+                table_block = None
+                continue
+            is_table = re.match(TABLE_ROW_PATTERN, line) is not None
+            # 連続する表の行は1つの placeholder にまとめる。行ごとに伏せると、訳文で行の間に空行が入っても検査を通り、戻した表が途切れる。
+            if is_table and table_block is not None:
+                blocks[table_block] += "\n" + line
                 continue
             prefix, body = split_line_prefix(line)
             blocks.append(body)
             hidden.append(len(blocks) - 1)
-            lines[number] = prefix + PLACEHOLDER % (base + len(blocks) - 1)
+            lines.append(prefix + PLACEHOLDER % (base + len(blocks) - 1))
+            table_block = len(blocks) - 1 if is_table else None
         text = "\n".join(lines)
     # 予約タグは場所によらず出現ごとに隠す。原文の区切りと衝突させず、タグに触れた文も訳す。
     text = re.sub("|".join(map(re.escape, RESERVED_TAGS)), replace_tag, text)
