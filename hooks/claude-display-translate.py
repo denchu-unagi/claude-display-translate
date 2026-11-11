@@ -214,8 +214,12 @@ def hide_japanese_line(line):
 
 def remaining_english(text):
     # 伏せた行とコードの placeholder は訳す本文ではないので、英字数に数えない。
+    # 表の行は担当名やモデル名などの訳さない語が多いので数えない。数えると、言語の切り替えでは表の途中に印が出て表の1行になり、
+    # 日本語が大半の返答では訳す語の無い表だけを送り、訳文に仮名が増えないため翻訳失敗になる。
     english = 0
     for line in text.split("\n"):
+        if re.match(TABLE_ROW_PATTERN, line):
+            continue
         body = re.sub(PLACEHOLDER_PATTERN, " ", split_line_prefix(line)[1])
         english += count_tokens(body_tokens(body))[2]
     return english
@@ -230,12 +234,7 @@ def switches_to_english(before, text):
         return False
     # 閉じていないフェンスの中も、コードの可能性が高いので判定から外す（protect_code は保護しない）。
     source = lead + "\n" + text if lead else text
-    # 表の行は担当名やモデル名などの訳さない語が多く、表の途中で切り替えると印の行が表の行として表示されるため。
-    lines = [
-        line
-        for line in split_fences(source)[0]
-        if not hide_japanese_line(line) and not re.match(TABLE_ROW_PATTERN, line)
-    ]
+    lines = [line for line in split_fences(source)[0] if not hide_japanese_line(line)]
     return remaining_english("\n".join(lines)) >= MIN_TRANSLATE_LETTERS
 
 

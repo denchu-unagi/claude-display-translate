@@ -354,6 +354,20 @@ class TranslationFlowTest(HookTestCase):
         self.assertFalse(marker.exists())
         self.assertIn("skipped_mostly_ja", self.log())
 
+    def test_marks_a_mostly_japanese_message_whose_only_english_is_in_table_rows(self):
+        # 日本語の行を伏せた後に残る英語が表の中の担当名やモデル名だけなら、訳す語が無いので翻訳を呼ばずに印を付ける。
+        # 表の行を訳す英語に数えると翻訳に送り、訳文に仮名が増えないので翻訳失敗として原文を表示していた。
+        marker = self.use_translator()
+        deltas = ["Reviewing the pull request for the thinking note and README ",
+                  "の変更点を確認し、問題なければマージします。\n",
+                  "コミットをプッシュして、レビューもおわりました。あとはマージをまつだけです。\n\n"
+                  "| 工程 | 担当 | モデル |\n|---|---|---|\n"
+                  "| 調査 | worker | example-model-2 / high |\n| 実装 | executor | example-model-3 / medium |\n", ""]
+        outputs = self.run_flushes(deltas)
+        self.assertEqual(outputs, [MARK, "", "", MOSTLY_JA_MARK + "".join(deltas)])
+        self.assertFalse(marker.exists())
+        self.assertIn("skipped_mostly_ja", self.log())
+
     def test_does_not_repeat_a_line_shown_before_the_language_was_decided(self):
         self.use_translator()
         # 並行に起動したflushが逆順に処理され、短いflush 1が言語確定前に原文で表示された状況を固定する。
