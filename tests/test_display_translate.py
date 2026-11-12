@@ -30,6 +30,14 @@ MOSTLY_JAPANESE = (
     "    - Parse the config and validate it before saving.\n"
 )
 WAIT_SECONDS = 10
+# 英語の1行目に続く、ほぼ日本語の本文と表。表のセルは日本語か、ファイル名や状態などの短い英語だけ。
+TABLE = "| ファイル | 状態 |\n|---|---|\n| `src/app.py` | updated |\n| README.md | unchanged |\n"
+MOSTLY_JAPANESE_WITH_TABLE = [
+    "Reviewing the pull request for the thinking note and README ",
+    "の変更点を確認し、問題なければマージします。\n",
+    "コミットをプッシュして、レビューもおわりました。あとはマージをまつだけです。\n\n" + TABLE,
+]
+ENGLISH_AFTER_TABLE = "\n    - Parse the config and validate it before saving.\n"
 
 
 def payload(message_id, index, final, delta, session_id="session1"):
@@ -353,6 +361,49 @@ class TranslationFlowTest(HookTestCase):
         self.assertEqual(outputs, [MARK, "", "", MOSTLY_JA_MARK + "".join(deltas)])
         self.assertFalse(marker.exists())
         self.assertIn("skipped_mostly_ja", self.log())
+
+    def test_marks_a_mostly_japanese_message_whose_only_english_is_in_a_table(self):
+        # 日本語の行と表の行を伏せた後に訳す英語が残らないなら、翻訳を呼ばずに印を付ける。
+        # 表の行を伏せないと、セルの短い語だけを翻訳に送り、訳文に仮名が増えないので翻訳失敗として原文を表示していた。
+        marker = self.use_translator()
+        deltas = [*MOSTLY_JAPANESE_WITH_TABLE, ""]
+        outputs = self.run_flushes(deltas)
+        self.assertEqual(outputs, [MARK, "", "", MOSTLY_JA_MARK + "".join(deltas)])
+        self.assertFalse(marker.exists())
+        self.assertIn("skipped_mostly_ja", self.log())
+
+    def test_keeps_table_rows_original_in_a_mostly_japanese_message(self):
+        # 日本語が大半のメッセージでは、表の外の英語の行だけを訳し、表の行は日本語の行と同じく翻訳に送らずに原文のまま表示する。
+        # セルの短い語を送ると、翻訳 API が文脈なしに訳して誤訳する（fable を「寓話」にするなど）。
+        received = self.root / "received.txt"
+        self.use_line_translator(received)
+        deltas = [*MOSTLY_JAPANESE_WITH_TABLE[:-1], MOSTLY_JAPANESE_WITH_TABLE[-1] + ENGLISH_AFTER_TABLE, ""]
+        outputs = self.run_flushes(deltas)
+        self.assertEqual(outputs, [MARK, "", "", "".join(deltas).replace("before saving.", "before saving. やく")])
+        sent = received.read_text(encoding="utf-8")
+        self.assertNotIn("unchanged", sent)
+        self.assertNotIn("|", sent)
+
+    def test_keeps_a_table_whole_when_the_translation_adds_blank_lines(self):
+        # 訳文で placeholder の行の後に空行が入っても、連続する表の行は1つの placeholder にまとめて伏せるので、戻した表が途切れない。
+        self.use_child("\n".join([
+            "import re, sys",
+            "prompt = open(sys.argv[sys.argv.index('--system-prompt-file') + 1], encoding='utf-8').read()",
+            "source = re.search(r'<source>\\n(.*)\\n</source>', prompt, re.S).group(1)",
+            "hidden = r'[ \\t>#*+0-9.)-]*\\[\\[\\[CODE\\d+\\]\\]\\]'",
+            "lines = []",
+            "for line in source.split('\\n'):",
+            "    lines.append(line if not line.strip() or re.fullmatch(hidden, line) else line + ' やく')",
+            "    if re.fullmatch(hidden, line):",
+            "        lines.append('')",
+            "print('<translation>\\n' + '\\n'.join(lines) + '\\n</translation>')",
+            "",
+        ]))
+        deltas = [*MOSTLY_JAPANESE_WITH_TABLE[:-1], MOSTLY_JAPANESE_WITH_TABLE[-1] + ENGLISH_AFTER_TABLE, ""]
+        outputs = self.run_flushes(deltas)
+        self.assertEqual(outputs[0], MARK)
+        self.assertIn(TABLE, outputs[3])
+        self.assertIn("before saving. やく", outputs[3])
 
     def test_does_not_repeat_a_line_shown_before_the_language_was_decided(self):
         self.use_translator()
