@@ -105,21 +105,20 @@ Stop hook で訳文を Claude に返す方式では、訳文や翻訳の指示�
 - 日本語混じり
 - 約2000文字の長文
 
-時間は CLI の起動を含む1件の翻訳時間の中央値です。
+どのモデルも hook と同じ経路で、同じ回にまとめて訳しました。時間は CLI の起動を含む1件の翻訳時間の中央値です。
 
 | モデル | CLI | effort | 翻訳の中央値 | 得点（5段階） | 重大な誤訳 | 必須事実の欠落 | 判定 |
 |---|---|---|---|---|---|---|---|
-| `claude-haiku-5-5` | Claude Code 2.1.301 | low | 3.14秒 | 4.92 | 0件 | 0件 | 合格（既定） |
-| `gpt-6-luna` | Codex 0.163.0 | low | 4.83秒 | 4.75 | 0件 | 0件 | 合格 |
-| `gpt-6.1-terra` | Codex 0.164.0 | low | 5.07秒 | 4.69 | 0件 | 0件 | 合格 |
-| `claude-sonnet-5-5` | Claude Code 2.1.316 | low | 5.21秒 | 4.72 | 0件 | 0件 | 合格 |
-| `deepseek-v4.1-flash` | pi 1.3.0（OpenCode Go） | low | 5.74秒 | 4.75 | 0件 | 0件 | 合格 |
-| `gemini-3.8-flash` | Antigravity 1.4.12 | low | 8.89秒 | 4.83 | 0件 | 0件 | 合格 |
+| `claude-haiku-5-5` | Claude Code 2.1.322 | low | 2.68秒 | 4.83 | 0件 | 0件 | 合格（既定） |
+| `claude-sonnet-5-5` | Claude Code 2.1.322 | low | 2.26秒 | 4.61 | 0件 | 0件 | 合格 |
+| `gpt-6.1-terra` | Codex 0.167.0 | low | 6.00秒 | 4.97 | 0件 | 0件 | 合格 |
+| `gpt-6-luna` | Codex 0.167.0 | low | 6.09秒 | 4.67 | 0件 | 0件 | 合格 |
+| `deepseek-v4.1-flash` | pi 1.5.2（OpenCode Go） | low | 7.19秒 | 4.81 | 0件 | 0件 | 合格 |
 
 - 合格の条件は、18件すべてが45秒以内に終わって機械的な検査（日本語で返ること、Markdown・コード・表の書式が保たれることなど）に合格し、重大な誤訳と必須事実の欠落が0件で、得点の平均が4以上であることです。hook の既定は、追加の設定なしで使える `claude-haiku-5-5` にしています。
 - 得点は、5が「自然で正確」、4が「意味は変わらないが小さな不自然さがある」です。訳したモデル名を伏せて Anthropic の `claude-opus-5-5` に2回採点させた平均で、誤訳の指摘は原文と照合して確かめました。
 
-Sarashina のモデルの結果は、[Sarashina で翻訳する](docs/sarashina.md#比較)にあります。
+同じ回に測った Sarashina のモデルの結果は、[Sarashina で翻訳する](docs/sarashina.md#比較)にあります。
 
 ## 動作要件
 
@@ -218,7 +217,7 @@ Claude Code の公式ドキュメントと同じ流れで設定ファイルに h
    |---|---|---|---|
    | `haiku` | hook に組み込みの `claude -p`。`settings.py` を置かないときと同じ | `claude-haiku-5-5`（effort low） | Claude Code |
    | `luna` | Codex CLI（`codex exec`） | `gpt-6-luna`（effort low） | Codex CLI へのログイン |
-   | `sarashina` | Sarashina API | `sarashina3-translate`（翻訳 API だけ） | [Sarashina API のキー](docs/sarashina.md#sarashina-の-api-キー) |
+   | `sarashina` | Sarashina API | `sarashina3-translate` | [Sarashina API のキー](docs/sarashina.md#sarashina-の-api-キー) |
 
    `sarashina` を選ぶ前に、[Sarashina を使うときの注意](docs/sarashina.md#sarashina-を使うときの注意)を読んでください。利用できる人や、送った文章の扱いに条件があります。
 
